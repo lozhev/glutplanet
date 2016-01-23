@@ -1,5 +1,5 @@
 # glutplanet
-Simple map viewer like SAS.Planet.<br>
+Simple map viewer like SAS.Planet for windows, linux<br>
 View tiles from Bing,Yandex,OpenStreetMap and other.<br>
 Store tiles local in TMS format.<br>
 
