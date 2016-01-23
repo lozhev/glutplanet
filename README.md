@@ -10,5 +10,7 @@ And TinyCThread for download, load in separated thread.<br>
 Little size One source file in C.<br>
 
 TODO:<br>
+fix first time draw.<br>
 fix sometime error: corrupted double-linked list after free(tile).<br>
 add blend.<br>
+raplace tiles_loaded form flat array to ListTile or SyncTileList with sorted push
