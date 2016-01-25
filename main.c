@@ -172,7 +172,7 @@ void push_synclist(SyncTileList* list,Tile* tile) {
 	node->tile = tile;
 	node->next=0;
 	node->prev=0;
-	//mtx_lock(&list->mtx); // cell from main thread
+	mtx_lock(&list->mtx); // call from main thread..
 	if (list->last==0) {
 		list->first = node;
 		list->last = node;
@@ -182,7 +182,7 @@ void push_synclist(SyncTileList* list,Tile* tile) {
 		list->last = node;
 	}
 	++list->count;
-	//mtx_unlock(&list->mtx);
+	mtx_unlock(&list->mtx);
 	cnd_signal(&list->cnd);
 }
 
@@ -808,7 +808,7 @@ int main(int argc, char* argv[]) {
 	thrd_t thrd1,thrd2,thrd3,thrd4;
 	time_t tm;
 	srand((unsigned int)time(&tm));
-	curl_global_init(0/*CURL_GLOBAL_DEFAULT*/);// without ssl
+	curl_global_init(CURL_GLOBAL_WIN32/*CURL_GLOBAL_DEFAULT*/);// without ssl
 	//initMqcdnMap(&map);
 	//initOSMMap(&map);
 	initBingMap(&map);
