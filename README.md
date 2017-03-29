@@ -1,16 +1,16 @@
 # glutplanet
-Simple map viewer like SAS.Planet for windows, linux<br>
-View tiles from Bing,Yandex,OpenStreetMap and other.<br>
-Store tiles local in TMS format.<br>
+Simple map viewer like SAS.Planet for windows, linux
+View tiles from Bing,Yandex,OpenStreetMap and other.
+Store tiles local in TMS format.
 
-Used CURL for download tiles.<br>
-Used stb_image for read jpeg, png tiles.<br>
-And TinyCThread for download, load in separated thread.<br>
+Used CURL for download tiles.
+Used stb_image for read jpeg, png tiles.
+And TinyCThread for download, load in separated thread.
 
-Little size One source file in C.<br>
+Little size One source file in C
 
-TODO:<br>
-fix first time draw.<br>
-fix sometime error: corrupted double-linked list after free(tile).<br>
-add blend.<br>
+TODO:
+fix first time draw.
+fix sometime error: corrupted double-linked list after free(tile).
+add blend.
 raplace tiles_loaded form flat array to ListTile or SyncTileList with sorted push
