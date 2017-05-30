@@ -525,17 +525,17 @@ stbi_uc* getImageData(Tile* tile) {
 	}
 	return data;
 }
-
+void idle(void);
 int worker_thread(void* arg) {
 	mtx_t mtx;
 	mtx_init(&mtx,1);
 	while (1) {
 		Tile* tile = tile_wait_pull(tiles_get);
 		stbi_uc* data = getImageData(tile);
-
 		mtx_lock(&mtx);
 		tile->texdata = data;
 		tiles_loaded[tiles_loaded_count++] = tile;
+		//glutPostRedisplay();
 		mtx_unlock(&mtx);
 	}
 	return 0;
@@ -652,6 +652,8 @@ void draw(void) {
 		{-165.0,60.0-5.0}
 	};
 	double point[2];
+
+	//idle();
 
 	glClear(GL_COLOR_BUFFER_BIT);
 
@@ -776,6 +778,7 @@ void mousemove(int x,int y) {
 }
 
 void idle(void) {
+	//struct timespec s;
 	if (tiles_loaded_count>0) {
 		Tile* tile = tiles_loaded[--tiles_loaded_count];
 		GLuint textureId;
@@ -784,13 +787,17 @@ void idle(void) {
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, tile->texdata);
 		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		//printf("free texdata: %p\n",tile->texdata);
 		free(tile->texdata);//FIXME: corrupted double-linked list
 		tile->tex = textureId;
 		glutPostRedisplay();
+		return;
 	}
+	//s.tv_nsec = 50;
+	//thrd_sleep(&s,0);
+	Sleep(50);
 }
 
 double log2(double Value) {
