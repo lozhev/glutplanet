@@ -800,11 +800,11 @@ void idle(void) {
 	Sleep(50);
 }
 
-double log2(double Value) {
+/*double log2(double Value) {
 	return log(Value) * (1.4426950408889634073599246810019);
-}
+}*/
 
-void do_exit(){
+void do_exit(void){
 	//destroy_synclist(tiles_get);
 	clear_list(tiles);
 	//destroy_list(tiles);
