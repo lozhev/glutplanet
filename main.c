@@ -4,12 +4,15 @@
 #include <stdio.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize.h"
 #include <curl/curl.h>
 #include "tinycthread.h"
 #include <search.h>
 #if defined(WIN32)
 #include <direct.h>
 #endif
+#include "dirent.h"
 #define _USE_MATH_DEFINES
 #include <math.h>
 
@@ -750,8 +753,8 @@ void mouse(int button, int state, int x, int y) {
 			lastzoom = zoom;
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
 		}
-		make_tiles();
-		glutPostRedisplay();
+		//make_tiles();
+		//glutPostRedisplay();
 	} else if (button == 4) {
 		int zoom = (int)floor(center.zoom+0.5);
 		crd_zoomby(&center,-0.05);
@@ -759,8 +762,8 @@ void mouse(int button, int state, int x, int y) {
 			lastzoom = zoom;
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
 		}
-		make_tiles();
-		glutPostRedisplay();
+		//make_tiles();
+		//glutPostRedisplay();
 	}
 }
 
@@ -772,9 +775,9 @@ void mousemove(int x,int y) {
 
 	center.column += ox/256.0;
 	center.row += oy/256.0;
-	make_tiles();
+	//make_tiles();
 
-	glutPostRedisplay();
+	//glutPostRedisplay();
 }
 
 void idle(void) {
@@ -804,18 +807,289 @@ double log2(double Value) {
 	return log(Value) * (1.4426950408889634073599246810019);
 }
 
-void do_exit(){
+void do_exit(void){
 	//destroy_synclist(tiles_get);
 	clear_list(tiles);
 	//destroy_list(tiles);
 	//destroyMap(&map);
 }
 
+void print(const char* format, ...) {
+	va_list argptr;
+	char buf[256];
+	va_start(argptr, format);
+	vsprintf(buf, format, argptr);
+	OutputDebugStringA(buf);
+	va_end(argptr);
+}
+
+static double inv_freq;
+
+void initTime(){
+	LARGE_INTEGER freq;
+	QueryPerformanceFrequency(&freq);
+	inv_freq = 1.0 / (double)freq.QuadPart;
+}
+
+LARGE_INTEGER getCurrentTime(){
+	LARGE_INTEGER curr;
+	QueryPerformanceCounter(&curr);
+	return curr;
+}
+
+float getTimeDifference(const LARGE_INTEGER from, const LARGE_INTEGER to)
+{
+	long long diff = to.QuadPart - from.QuadPart;
+	return (float) ((double)(diff) * inv_freq);
+}
+
+typedef struct Node{
+	void* data;
+	struct Node* next;
+}Node;
+
+typedef struct{
+	Node* first,*last;
+}Queues;
+
+typedef struct{
+	char* path;
+	void* data;
+	short w,h;
+	GLint gltex;
+}TexData;
+
+void queues_push(Queues* q,void* data, int ds){
+	Node* n = (Node*)malloc(sizeof(Node));
+	n->data = data;//malloc(ds);
+	//memcpy(n->data,data,ds);
+	//print("push %s\n",data);
+	//print("push %s\n",((TexData*)data)->path);
+
+	if (q->last==0){
+		q->first = q->last = n;
+	} else {
+		q->last->next = n;
+		q->last = n;
+	}
+
+	n->next = 0;
+}
+
+void* queues_pop(Queues* q){
+	Node* n = q->first;
+	void* ret = 0;
+	if (n){
+	ret = n->data;
+	q->first = n->next;
+	if (q->first==0) q->last=0;
+	free(n);
+	}
+	return ret;
+}
+
+void queues_claer(Queues* q){
+	Node* n = q->first;
+	while(n){
+		Node* nd = n;
+		free(n->data);
+		n = n->next;
+		free(nd);
+	}
+	q->last = 0;
+}
+
+int queues_print(Queues* q){
+	Node* n = q->first;
+	int ret=0;
+	while(n){
+		print("%s\n",n->data);
+		n = n->next;
+		++ret;
+	}
+	return ret;
+}
+
+Queues path_list;
+Queues tex_list;
+
+
+
+TexData* loadImageData(char* filename) {
+	stbi_uc* data,*out;
+	int w,h,comp;
+	TexData* texdata = malloc(sizeof(TexData));
+	data = stbi_load(filename,&w,&h,&comp,0);
+	out = malloc(128*128*3);
+	stbir_resize_uint8(data,w,h,0,out,128,128,0,comp);
+	free(data);
+	texdata->data = out;
+	texdata->w = 128;
+	texdata->h = 128;
+	texdata->path = filename;
+	texdata->gltex = 0;
+	return texdata;
+}
+
+#define _FOURCC(a, b, c, d) (a | (b << 8) | (c << 16) | (d << 24))
+
+void worker_path(void* param){
+	int i=0;
+	/*while(1){
+		print("param1 %p i: %d\n",param,i);
+		++i;
+	}*/
+	
+	DIR *dir;
+	dirent *ent;
+	if ((dir = opendir(param)) != NULL){
+		while ((ent = readdir(dir)) != NULL){
+			if (ent->d_name[0]=='.') continue;
+			if (S_ISDIR(ent->d_type)){
+				//char path[MAX_PATH];
+				char* path = malloc(MAX_PATH);
+
+				//print("dir %s\n", ent->d_name);
+				strcpy(path,param);
+				strcat(path,ent->d_name);
+				strcat(path,"/");
+				// recursive
+				worker_path(path);
+				// threaded
+				//CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, path, 0, NULL);
+			}
+			else if (S_ISREG(ent->d_type)){
+				//char path[MAX_PATH];
+				char* path = malloc(MAX_PATH);
+				int jpg[2] = {
+					_FOURCC('.','j','p','g'),
+					_FOURCC('.','J','P','G')
+				};
+				int ext = *(int*)&ent->d_name[ent->d_namlen-4];
+
+				//if (strstr(ent->d_name,".JPG") || strstr(ent->d_name,".jpg")){
+				/*if ((ent->d_name[ent->d_namlen-3] == 'j' &&
+					ent->d_name[ent->d_namlen-2] == 'p' &&
+					ent->d_name[ent->d_namlen-1] == 'g') || 
+					(ent->d_name[ent->d_namlen-3] == 'J' &&
+					ent->d_name[ent->d_namlen-2] == 'P' &&
+					ent->d_name[ent->d_namlen-1] == 'G')){*/
+				if (ext == jpg[1] || ext == jpg[0]){
+					int len = strlen(param);
+					strcpy(path,param);
+					strcat(path,ent->d_name);
+					//print("file %s\n", ent->d_name);
+					//queues_push(&path_list,path,len + ent->d_namlen + 1);
+					print("push %s\n",path);
+					queues_push(&path_list,path,0);
+				}
+			}
+		}
+		closedir (dir);
+	}
+}
+
+void worker_load(void* param){
+	while(1){
+		char* path = queues_pop(&path_list);
+		if (path) {
+			print("load %s\n",path);
+			queues_push(&tex_list,loadImageData(path),0);
+		}
+	}
+}
+
+GLuint textures[1024];
+int textures_count;
+void make_texture(){
+	TexData* texd = queues_pop(&tex_list);
+	if (texd){
+		GLuint textureId;
+		glGenTextures(1, &textureId);
+		glBindTexture(GL_TEXTURE_2D, textureId);
+		glTexImage2D(GL_TEXTURE_2D, 0, 3, texd->w, texd->h, 0, GL_RGB, GL_UNSIGNED_BYTE, texd->data);
+		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		//printf("free texdata: %p\n",texd->data);
+		free(texd->data);
+		free(texd->path);
+		textures[textures_count++] = textureId;
+	}
+}
+
+void Render(float f){
+	int i;
+	double tx;
+	double ty;
+
+	make_texture();
+
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	glColor3f( 1.0f, 1.0f, 1.0f );
+	glEnable(GL_TEXTURE_2D);
+	for (i=0; i<textures_count; ++i) {
+		/*Tile* t = tiles_draw[i];
+
+		double scale = pow(2.0, center.zoom - t->z);
+		double ts = 256.0 * scale;
+		crd_t coord = center;
+		crd_zoomto(&coord,t->z);
+
+		tx = (t->x - coord.column) * ts;
+		ty = (t->y - coord.row) * ts;*/
+
+		double scale = pow(2.0, center.zoom-4);
+		double ts = 128 * scale;
+		crd_t coord = center;
+		crd_zoomto(&coord,4);
+		tx = (i/10 -2- coord.column) * ts;
+		ty = (i%10 -2- coord.row) * ts;
+
+		glBindTexture(GL_TEXTURE_2D, textures[i]);
+		glBegin(GL_TRIANGLE_STRIP);
+		glVertex2d(tx, ty); glTexCoord2f(0, 1);
+		glVertex2d(tx, ty+ts); glTexCoord2f(1, 0);
+		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
+		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
+		glEnd();
+	}
+	glutSwapBuffers();
+}
+
+void Draw_empty(void){}
+
 int main(int argc, char* argv[]) {
+	HANDLE th[4];
+	LARGE_INTEGER start;
 	thrd_t thrd1,thrd2,thrd3,thrd4;
 	time_t tm;
+	SetThreadAffinityMask(GetCurrentThread(), 1);
 	srand((unsigned int)time(&tm));
 	curl_global_init(CURL_GLOBAL_WIN32/*CURL_GLOBAL_DEFAULT*/);// without ssl
+	initTime();
+
+	//start = getCurrentTime();
+	//worker_thread2("d:/docs/");
+	//print("time1: %f\n",getTimeDifference(start,getCurrentTime()));
+
+	//queues_print(&path_list);
+	//queues_claer(&path_list);
+
+	//start = getCurrentTime();
+	th[0] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_path, "d:/"/*param*/, 0, NULL);
+	//th2 = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, (void*)2/*param*/, 0, NULL);
+	//th3 = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, (void*)3/*param*/, 0, NULL);
+	//th4 = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, (void*)4/*param*/, 0, NULL);
+	th[4] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_load, 0, 0, NULL);
+	th[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_load, 0, 0, NULL);
+	//WaitForSingleObject(th[0], INFINITE);
+	//print("time2: %f\n",getTimeDifference(start,getCurrentTime()));
+	//Sleep(500);
+	//print("count: %d\n",queues_print(&path_list));
+
 	//initMqcdnMap(&map);
 	//initOSMMap(&map);
 	initBingMap(&map);
@@ -828,9 +1102,29 @@ int main(int argc, char* argv[]) {
 	glutCreateWindow("glutplanet");
 	glutMouseFunc(mouse);
 	glutMotionFunc(mousemove);
-	glutIdleFunc(idle);
+	//glutIdleFunc(idle);
 	glutReshapeFunc(reshape);
-	glutDisplayFunc(draw);
+	glutDisplayFunc(Draw_empty/*draw*/);
+
+	/*{stbi_uc* data=0,*out;
+	int w,h,comp;
+	GLuint textureId;
+	GLenum err;
+	//data = stbi_load("d:/libs/glutplanet/build/bing/6/6/18.jpeg",&w,&h,&comp,0);
+	data = stbi_load("d:/docs/foto/abatsk/19-05-2016_09-27-35/BQ4525.jpg",&w,&h,&comp,0);
+	glGenTextures(1, &textureId);
+	glBindTexture(GL_TEXTURE_2D, textureId);
+	err = glGetError();
+	out = malloc(128*128*3);
+	stbir_resize_uint8(data,w,h,0,out,128,128,0,comp);
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, 128, 128, 0, GL_RGB, GL_UNSIGNED_BYTE, out);}*/
+
+	//glutMainLoop();
+	for (;;){
+		glutMainLoopEvent();
+
+		Render(0);
+	}
 
 	tiles = make_list();
 	tiles_get = make_synclist();
