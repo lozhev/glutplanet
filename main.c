@@ -1,3 +1,4 @@
+#include "glad/glad.h"
 #include <GL/glut.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -11,8 +12,9 @@
 #include <search.h>
 #if defined(WIN32)
 #include <direct.h>
+#include <process.h>
+#include "dirent.h" // win32 only??
 #endif
-#include "dirent.h"
 #define _USE_MATH_DEFINES
 #include <math.h>
 
@@ -20,6 +22,14 @@
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
+void print(const char* format, ...) {
+	char buf[256];
+	va_list argptr;
+	va_start(argptr, format);
+	vsprintf(buf, format, argptr);
+	va_end(argptr);
+	OutputDebugStringA(buf);
+}
 
 // Tile
 typedef struct Tile {
@@ -285,6 +295,105 @@ void print_list(TileList* list) {
 int clamp(int n, int lower, int upper) {
 	return n < lower ? lower : n > upper ? upper : n;
 }
+
+// Queue
+typedef struct Node{
+	void* data;
+	struct Node* next;
+}Node;
+
+typedef struct{
+	Node* first,*last;
+
+	mtx_t mtx;
+	cnd_t cnd;
+	int count;
+}Queue;
+
+typedef struct{
+	void* data;
+	short w,h;
+}TexData;
+
+void queue_init(Queue *q){
+	mtx_init(&q->mtx, 1);
+	cnd_init(&q->cnd);
+}
+
+void queue_push(Queue* q,void* data){
+	Node* n = (Node*)malloc(sizeof(Node));
+	n->data = data;
+	mtx_lock(&q->mtx);
+	if (q->last){
+		q->last->next = n;
+	} else {
+		q->first = n;
+	}
+	n->next = 0;
+	q->last = n;
+	++q->count;
+	mtx_unlock(&q->mtx);
+	cnd_signal(&q->cnd);
+}
+
+void queue_insert(Queue* q,void* data){
+	Node* n = (Node*)malloc(sizeof(Node));
+	n->data = data;
+	mtx_lock(&q->mtx);
+	if (q->count){
+		n->next = q->first;
+		q->first = n;
+	} else {
+		q->first = n;
+		n->next = 0;
+	}
+	++q->count;
+	mtx_unlock(&q->mtx);
+	cnd_signal(&q->cnd);
+}
+
+void* queue_pop(Queue* q){
+	Node* n;
+	void* ret = 0;
+	mtx_lock(&q->mtx);
+	n = q->first;
+	if (n){
+		ret = n->data;
+		q->first = n->next;
+		if (q->first==0) q->last=0;
+		--q->count;
+		//print("q: %d\n",q->count);
+		mtx_unlock(&q->mtx);
+		free(n);
+		return ret;
+	}
+	mtx_unlock(&q->mtx);
+	return ret;
+}
+
+void* queue_pop_wait(Queue* q) {
+	Node* n;
+	void* ret = 0;
+	mtx_lock(&q->mtx);
+	while(q->first == 0) {
+		cnd_wait(&q->cnd, &q->mtx);
+	}
+
+	n = q->first;
+	ret = n->data;
+	q->first = n->next;
+	if(q->first == 0) q->last = 0;
+	--q->count;
+	//print("q: %d\n",q->count);
+	mtx_unlock(&q->mtx);
+	free(n);
+	return ret;
+}
+
+typedef struct {
+	float vtx[16];
+	GLuint tex;
+}Quad;
 
 // IO funcs
 #ifndef _WIN32
@@ -643,24 +752,24 @@ double getyp(double lat,double pzoom){
 }
 
 void draw(void) {
-	int i;
-	double tx;
-	double ty;
-	double powz;
+//	int i;
+//	double tx;
+//	double ty;
+//	double powz;
 	//bound srtm_04_01.tif
-	double p[][2]={
+/*	double p[][2]={
 		{-165.0,60.0},
 		{-165.0+5.0,60.0},
 		{-165.0+5.0,60.0-5.0},
 		{-165.0,60.0-5.0}
-	};
-	double point[2];
+	};*/
+//	double point[2];
 
 	//idle();
 
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	glColor3f( 1.0f, 1.0f, 1.0f );
+	/*glColor3f( 1.0f, 1.0f, 1.0f );
 	glEnable(GL_TEXTURE_2D);
 	for (i=0; i<tiles_draw_count; ++i) {
 		Tile* t = tiles_draw[i];
@@ -724,16 +833,311 @@ void draw(void) {
 		point[1] = 256.0 * (point[1] - center.row);
 		glVertex2d(point[0], point[1]);
 	}
-	glEnd();
+	glEnd();*/
 
 	glutSwapBuffers();
 }
 
+void idle(void) {
+	//struct timespec s;
+	if (tiles_loaded_count>0) {
+		Tile* tile = tiles_loaded[--tiles_loaded_count];
+		GLuint textureId;
+		glGenTextures(1, &textureId);
+		glBindTexture(GL_TEXTURE_2D, textureId);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, tile->texdata);
+		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		//printf("free texdata: %p\n",tile->texdata);
+		free(tile->texdata);//FIXME: corrupted double-linked list
+		tile->tex = textureId;
+		glutPostRedisplay();
+		return;
+	}
+	//s.tv_nsec = 50;
+	//thrd_sleep(&s,0);
+	Sleep(50);
+}
+
+#if _MSC_VER < 1900
+double log2(double Value) {
+	return log(Value) * (1.4426950408889634073599246810019);
+}
+#endif
+
+void do_exit(void){
+	//destroy_synclist(tiles_get);
+	clear_list(tiles);
+	//destroy_list(tiles);
+	//destroyMap(&map);
+}
+
+/*static double inv_freq;
+
+void initTime(){
+	LARGE_INTEGER freq;
+	QueryPerformanceFrequency(&freq);
+	inv_freq = 1.0 / (double)freq.QuadPart;
+}
+
+LARGE_INTEGER getCurrentTime(){
+	LARGE_INTEGER curr;
+	QueryPerformanceCounter(&curr);
+	return curr;
+}
+
+float getTimeDifference(const LARGE_INTEGER from, const LARGE_INTEGER to)
+{
+	long long diff = to.QuadPart - from.QuadPart;
+	return (float) ((double)(diff) * inv_freq);
+}*/
+
+//#define TEST_QUEUE 1
+#if TEST_QUEUE
+Queue path_list;
+Queue tex_list;
+
+TexData* loadImageData(char* filename) {
+	stbi_uc* data;
+	int w,h,comp;
+	TexData* texdata;
+	data = stbi_load(filename,&w,&h,&comp,0);
+	if(data == 0) return 0;
+#define S 256
+	texdata = malloc(sizeof(TexData));
+	if(w != S || h != S) {
+		stbi_uc* out = malloc(S*S * 3);
+		stbir_resize_uint8(data, w, h, 0, out, S, S, 0, comp);
+		free(data);
+		texdata->data = out;
+		texdata->w = S;
+		texdata->h = S;
+	} else {
+		texdata->data = data;
+		texdata->w = w;
+		texdata->h = h;
+	}
+#undef S
+	//texdata->path = filename;
+	//texdata->gltex = 0;
+	return texdata;
+}
+
+#define _FOURCC(a, b, c, d) (a | (b << 8) | (c << 16) | (d << 24))
+
+void worker_path(void* param){
+	DIR *dir;
+	dirent *ent;
+	if ((dir = opendir(param)) != NULL){
+		while ((ent = readdir(dir)) != NULL){
+			if (ent->d_name[0]=='.') continue;
+			if (S_ISDIR(ent->d_type)){
+				char path[MAX_PATH];
+				
+				strcpy(path,param);
+				strcat(path,ent->d_name);
+				strcat(path,"/");
+				// recursive
+				worker_path(path);
+			}
+			else if (S_ISREG(ent->d_type)){
+				int jpg[3] = {
+					_FOURCC('.','j','p','g'),
+					_FOURCC('.','J','P','G'),
+					_FOURCC('j','p','e','g')
+				};
+				int ext = *(int*)&ent->d_name[ent->d_namlen-4];
+
+				if (ext == jpg[1] || ext == jpg[0] || ext == jpg[2]){
+					char* path = malloc(MAX_PATH);
+					int len = strlen(param);
+					strcpy(path,param);
+					strcat(path,ent->d_name);
+					//print("push %s\n",path);
+					//queues_push(&path_list,path);
+					queue_insert(&path_list,path);
+				}
+			}
+		}
+		closedir(dir);
+	}
+}
+
+void worker_load(void* param){
+	while(1){
+		char* path = queue_pop_wait(&path_list);
+		TexData* tdata = loadImageData(path);
+		//print("load %s\n",path);
+		if (tdata) queue_push(&tex_list,tdata);
+		free(path);
+	}
+}
+
+GLuint textures[4096];
+int textures_count;
+void make_textures(){
+	//int i = 0;
+	TexData* texd = queue_pop(&tex_list);
+	while (texd /*&& i<4*/){
+		GLuint textureId;
+		glGenTextures(1, &textureId);
+		glBindTexture(GL_TEXTURE_2D, textureId);
+		glTexImage2D(GL_TEXTURE_2D, 0, 3, texd->w, texd->h, 0, GL_RGB, GL_UNSIGNED_BYTE, texd->data);
+		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		//mtx_lock(&queue_mtx);
+		free(texd->data);
+		free(texd);
+		//mtx_unlock(&queue_mtx);
+		textures[textures_count++] = textureId;
+		texd = queue_pop(&tex_list);
+		//++i;
+		//print("I: %d\n",i);
+	}
+}
+
+void Render(float f){
+	int i;
+	double tx;
+	double ty;
+
+	make_textures();
+
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	glColor3f( 1.0f, 1.0f, 1.0f );
+	glEnable(GL_TEXTURE_2D);
+	for (i=0; i<textures_count; ++i) {
+		/*Tile* t = tiles_draw[i];
+
+		double scale = pow(2.0, center.zoom - t->z);
+		double ts = 256.0 * scale;
+		crd_t coord = center;
+		crd_zoomto(&coord,t->z);
+
+		tx = (t->x - coord.column) * ts;
+		ty = (t->y - coord.row) * ts;*/
+
+		double scale = pow(2.0, center.zoom-4);
+		double ts = 256 * scale;
+		crd_t coord = center;
+		crd_zoomto(&coord,4);
+		tx = (i/10 -2- coord.column) * ts;
+		ty = (i%10 -2- coord.row) * ts;
+
+		glBindTexture(GL_TEXTURE_2D, textures[i]);
+		glBegin(GL_TRIANGLE_STRIP);
+		glVertex2d(tx, ty); glTexCoord2f(0, 1);
+		glVertex2d(tx, ty+ts); glTexCoord2f(1, 0);
+		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
+		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
+		glEnd();
+	}
+	glutSwapBuffers();
+}
+#endif
+
+const char vert_src[]=
+"attribute vec4 a_pos;"
+"uniform mat4 u_proj;"
+"varying vec2 v_tex;"
+"void main(){"
+"	gl_Position = u_proj * vec4(a_pos.xy, 0, 1);"
+"	v_tex = a_pos.zw;"
+"}";
+
+const char frag_src[]=
+"uniform sampler2D u_tex;"
+"varying vec2 v_tex;"
+"void main(){"
+"	gl_FragColor = texture2D(u_tex, v_tex);"
+"}";
+
+GLuint creatProg(const char* vert_src, const char* frag_src) {
+	GLuint prog, vert_id, frag_id;
+
+	vert_id = glCreateShader(GL_VERTEX_SHADER);
+	glShaderSource(vert_id, 1, &vert_src, 0);
+	glCompileShader(vert_id);
+
+	frag_id = glCreateShader(GL_FRAGMENT_SHADER);
+	glShaderSource(frag_id, 1, &frag_src, 0);
+	glCompileShader(frag_id);
+
+	prog = glCreateProgram();
+	glAttachShader(prog, vert_id);
+	glAttachShader(prog, frag_id);
+	glLinkProgram(prog);
+
+	glDeleteShader(vert_id);
+	glDeleteShader(frag_id);
+
+	return prog;
+}
+
+GLuint loadGLTexture(int w, int h, void* data){
+	GLuint tex;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	free(data);
+	return tex;
+}
+
+void makeQuad(Quad* q, Tile* t){
+	float tx, ty;
+	float* vtx = q->vtx;
+	double scale = pow(2.0, center.zoom - t->z);
+	float ts = (float)(256.0 * scale);
+	crd_t coord = center;
+	crd_zoomto(&coord,t->z);
+
+	tx = (float)(t->x - coord.column) * ts;
+	ty = (float)(t->y - coord.row) * ts;
+	vtx[0] =tx;    vtx[1] = ty;    vtx[2] = 0; vtx[3] = 0;
+	vtx[4] =tx;    vtx[5] = ty+ts; vtx[6] = 0; vtx[7] = 1;
+	vtx[8] =tx+ts; vtx[9] = ty;    vtx[10]= 1; vtx[11]= 0;
+	vtx[12]=tx+ts; vtx[13]= ty+ts; vtx[14]= 1; vtx[15]= 1;
+
+	q->tex = t->tex;
+}
+
+Tile ttile[4];
+Quad quads[4];
+GLuint prog;
+
+void createOrthographicOffCenter(float left, float right, float bottom, float top,
+								 float zNearPlane, float zFarPlane, float* dst) {
+	int i;
+	for (i = 0; i < 13; ++i) dst[i] = 0;
+	dst[0] = 2 / (right - left);
+	dst[5] = 2 / (top - bottom);
+	dst[12] = (left + right) / (left - right);
+	dst[10] = 1 / (zNearPlane - zFarPlane);
+	dst[13] = (top + bottom) / (bottom - top);
+	dst[14] = zNearPlane / (zNearPlane - zFarPlane);
+	dst[15] = 1;
+}
+
 void reshape(int w, int h) {
+	float m[16];
 	glViewport(0, 0, w, h);
-	glMatrixMode(GL_PROJECTION);
+	/*glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
-	glOrtho(-w/2, w/2, h/2, -h/2, -1, 1);
+	glOrtho(-w/2, w/2, h/2, -h/2, -1, 1);*/
+	if (prog){
+		createOrthographicOffCenter(-w/2.f, w/2.f, h/2.f, -h/2.f, -1, 1, m);
+		glUseProgram(prog);
+		glUniformMatrix4fv(0, 1, GL_FALSE, m);
+	}
 }
 
 int moffsetx=0;
@@ -780,269 +1184,13 @@ void mousemove(int x,int y) {
 	//glutPostRedisplay();
 }
 
-void idle(void) {
-	//struct timespec s;
-	if (tiles_loaded_count>0) {
-		Tile* tile = tiles_loaded[--tiles_loaded_count];
-		GLuint textureId;
-		glGenTextures(1, &textureId);
-		glBindTexture(GL_TEXTURE_2D, textureId);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, tile->texdata);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		//printf("free texdata: %p\n",tile->texdata);
-		free(tile->texdata);//FIXME: corrupted double-linked list
-		tile->tex = textureId;
-		glutPostRedisplay();
-		return;
-	}
-	//s.tv_nsec = 50;
-	//thrd_sleep(&s,0);
-	Sleep(50);
-}
-
-/*double log2(double Value) {
-	return log(Value) * (1.4426950408889634073599246810019);
-}*/
-
-void do_exit(void){
-	//destroy_synclist(tiles_get);
-	clear_list(tiles);
-	//destroy_list(tiles);
-	//destroyMap(&map);
-}
-
-void print(const char* format, ...) {
-	char buf[256];
-	va_list argptr;
-	va_start(argptr, format);
-	vsprintf(buf, format, argptr);
-	va_end(argptr);
-	OutputDebugStringA(buf);
-}
-
-static double inv_freq;
-
-void initTime(){
-	LARGE_INTEGER freq;
-	QueryPerformanceFrequency(&freq);
-	inv_freq = 1.0 / (double)freq.QuadPart;
-}
-
-LARGE_INTEGER getCurrentTime(){
-	LARGE_INTEGER curr;
-	QueryPerformanceCounter(&curr);
-	return curr;
-}
-
-float getTimeDifference(const LARGE_INTEGER from, const LARGE_INTEGER to)
-{
-	long long diff = to.QuadPart - from.QuadPart;
-	return (float) ((double)(diff) * inv_freq);
-}
-
-typedef struct Node{
-	void* data;
-	struct Node* next;
-}Node;
-
-typedef struct{
-	Node* first,*last;
-}Queues;
-
-typedef struct{
-	char* path;
-	void* data;
-	short w,h;
-	GLint gltex;
-}TexData;
-
-mtx_t queue_mtx;
-cnd_t queue_cnd;
-
-void queues_push(Queues* q,void* data, int ds){
-	Node* n = (Node*)malloc(sizeof(Node));
-	n->data = data;//malloc(ds);
-	//memcpy(n->data,data,ds);
-	//print("push %s\n",data);
-	//print("push %s\n",((TexData*)data)->path);
-	mtx_lock(&queue_mtx);
-	if (q->last==0){
-		q->first = q->last = n;
-	} else {
-		q->last->next = n;
-		q->last = n;
-	}
-
-	n->next = 0;
-	mtx_unlock(&queue_mtx);
-	cnd_signal(&queue_cnd);
-}
-
-void* queues_pop(Queues* q){
-	Node* n;
-	void* ret = 0;
-	mtx_lock(&queue_mtx);
-	n = q->first;
-	if (n){
-		ret = n->data;
-		q->first = n->next;
-		if (q->first==0) q->last=0;
-		free(n);
-	}
-	mtx_unlock(&queue_mtx);
-	return ret;
-}
-
-void* queues_pop_wait(Queues* q) {
-	Node* n;
-	void* ret = 0;
-	mtx_lock(&queue_mtx);
-	while(q->first == 0) {
-		cnd_wait(&queue_cnd, &queue_mtx);
-	}
-	n = q->first;
-	if(n) {
-		ret = n->data;
-		q->first = n->next;
-		if(q->first == 0) q->last = 0;
-		free(n);
-	}
-	mtx_unlock(&queue_mtx);
-	return ret;
-}
-
-Queues path_list;
-Queues tex_list;
-
-
-TexData* loadImageData(char* filename) {
-	stbi_uc* data;
-	int w,h,comp;
-	TexData* texdata;
-	data = stbi_load(filename,&w,&h,&comp,0);
-	if(data == 0) return 0;
-#define S 256
-	texdata = malloc(sizeof(TexData));
-	if(w != S || h != S) {
-		stbi_uc* out = malloc(S*S * 3);
-		stbir_resize_uint8(data, w, h, 0, out, S, S, 0, comp);
-		free(data);
-		texdata->data = out;
-		texdata->w = S;
-		texdata->h = S;
-	} else {
-		texdata->data = data;
-		texdata->w = w;
-		texdata->h = h;
-	}
-#undef S
-	//texdata->path = filename;
-	//texdata->gltex = 0;
-	return texdata;
-}
-
-#define _FOURCC(a, b, c, d) (a | (b << 8) | (c << 16) | (d << 24))
-
-void worker_path(void* param){
-	int i=0;
-	
-	DIR *dir;
-	dirent *ent;
-	if ((dir = opendir(param)) != NULL){
-		while ((ent = readdir(dir)) != NULL){
-			if (ent->d_name[0]=='.') continue;
-			if (S_ISDIR(ent->d_type)){
-				char path[MAX_PATH];
-				
-				strcpy(path,param);
-				strcat(path,ent->d_name);
-				strcat(path,"/");
-				// recursive
-				worker_path(path);
-			}
-			else if (S_ISREG(ent->d_type)){
-				int jpg[3] = {
-					_FOURCC('.','j','p','g'),
-					_FOURCC('.','J','P','G'),
-					_FOURCC('j','p','e','g')
-				};
-				int ext = *(int*)&ent->d_name[ent->d_namlen-4];
-
-				//if (strstr(ent->d_name,".JPG") || strstr(ent->d_name,".jpg")){
-				/*if ((ent->d_name[ent->d_namlen-3] == 'j' &&
-					ent->d_name[ent->d_namlen-2] == 'p' &&
-					ent->d_name[ent->d_namlen-1] == 'g') || 
-					(ent->d_name[ent->d_namlen-3] == 'J' &&
-					ent->d_name[ent->d_namlen-2] == 'P' &&
-					ent->d_name[ent->d_namlen-1] == 'G')){*/
-				if (ext == jpg[1] || ext == jpg[0] || ext == jpg[2]){
-					char* path = malloc(MAX_PATH);
-					int len = strlen(param);
-					strcpy(path,param);
-					strcat(path,ent->d_name);
-					//print("push %s\n",path);
-					queues_push(&path_list,path,0);
-				}
-			}
-		}
-		closedir(dir);
-	}
-	//print("dir done %s\n",param);
-}
-
-void worker_load(void* param){
-	while(1){
-		char* path = queues_pop_wait(&path_list);
-		if (path) {
-			TexData* tdata = loadImageData(path);
-			//print("load %s\n",path);
-			if (tdata) queues_push(&tex_list,tdata,0);
-			free(path);
-		} else {
-			print("path_list empty\n");
-		}
-	}
-}
-
-GLuint textures[2048];
-int textures_count;
-void make_texture(){
-	int i = 0;
-	TexData* texd = queues_pop(&tex_list);
-	while (texd && i<4){
-		GLuint textureId;
-		glGenTextures(1, &textureId);
-		glBindTexture(GL_TEXTURE_2D, textureId);
-		glTexImage2D(GL_TEXTURE_2D, 0, 3, texd->w, texd->h, 0, GL_RGB, GL_UNSIGNED_BYTE, texd->data);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		//printf("free texdata: %p\n",texd->data);
-		//mtx_lock(&queue_mtx);
-		free(texd->data);
-		free(texd);
-		//mtx_unlock(&queue_mtx);
-		textures[textures_count++] = textureId;
-		texd = queues_pop(&tex_list);
-	}
-}
-
 void Render(float f){
 	int i;
-	double tx;
-	double ty;
-
-	make_texture();
-
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	glColor3f( 1.0f, 1.0f, 1.0f );
+//	glColor3f( 1.0f, 1.0f, 1.0f );
 	glEnable(GL_TEXTURE_2D);
-	for (i=0; i<textures_count; ++i) {
+	for (i=0; i<4/*tiles_draw_count*/; ++i) {
 		/*Tile* t = tiles_draw[i];
 
 		double scale = pow(2.0, center.zoom - t->z);
@@ -1051,75 +1199,48 @@ void Render(float f){
 		crd_zoomto(&coord,t->z);
 
 		tx = (t->x - coord.column) * ts;
-		ty = (t->y - coord.row) * ts;*/
+		ty = (t->y - coord.row) * ts;
 
-		double scale = pow(2.0, center.zoom-4);
-		double ts = 256 * scale;
-		crd_t coord = center;
-		crd_zoomto(&coord,4);
-		tx = (i/10 -2- coord.column) * ts;
-		ty = (i%10 -2- coord.row) * ts;
-
-		glBindTexture(GL_TEXTURE_2D, textures[i]);
+		glBindTexture(GL_TEXTURE_2D, t->tex);
 		glBegin(GL_TRIANGLE_STRIP);
 		glVertex2d(tx, ty); glTexCoord2f(0, 1);
 		glVertex2d(tx, ty+ts); glTexCoord2f(1, 0);
 		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
 		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
-		glEnd();
+		glEnd();*/
+		glBindTexture(GL_TEXTURE_2D,quads[i].tex);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,quads[i].vtx);
+		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
-	glutSwapBuffers();
 }
 
 void Draw_empty(void){}
-#ifdef _DEBUG
-#include <crtdbg.h>
+
+int num_cores(){
+#if _WIN32
+	SYSTEM_INFO sysinfo;
+	GetSystemInfo(&sysinfo);
+	return sysinfo.dwNumberOfProcessors;
+#elif __linux
+	return sysconf(_SC_NPROCESSORS_ONLN);
+#else
+#error "platform error"
 #endif
+} 
+
+void tile_init(Tile* t,int x,int y,int z){
+	t->x = x;
+	t->y = y;
+	t->z = z;
+}
+
 int main(int argc, char* argv[]) {
-	HANDLE th[4];
-	LARGE_INTEGER start;
+	int i;
 	thrd_t thrd1,thrd2,thrd3,thrd4;
 	time_t tm;
-#ifdef _DEBUG
-	int flag = _CrtSetDbgFlag(_CRTDBG_REPORT_FLAG); // Get current flag
-	flag |= _CRTDBG_LEAK_CHECK_DF; // Turn on leak-checking bit
-	flag |= _CRTDBG_CHECK_ALWAYS_DF; // Turn on CrtCheckMemory
-	//flag |= _CRTDBG_DELAY_FREE_MEM_DF;
-	_CrtSetDbgFlag(flag); // Set flag to the new value
-#endif
 	srand((unsigned int)time(&tm));
-	//curl_global_init(CURL_GLOBAL_WIN32/*CURL_GLOBAL_DEFAULT*/);// without ssl
-	initTime();
-	mtx_init(&queue_mtx, 1);
-	cnd_init(&queue_cnd);
-
-	//start = getCurrentTime();
-	//worker_thread2("d:/docs/");
-	//print("time1: %f\n",getTimeDifference(start,getCurrentTime()));
-
-	//queues_print(&path_list);
-	//queues_claer(&path_list);
-
-	//start = getCurrentTime();
-	th[0] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_path, "d:/", 0, NULL);
-	//th2 = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, (void*)2/*param*/, 0, NULL);
-	//th3 = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, (void*)3/*param*/, 0, NULL);
-	//th4 = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_thread2, (void*)4/*param*/, 0, NULL);
-	CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_load, 0, 0, NULL);
-	CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_load, 0, 0, NULL);
-	CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_load, 0, 0, NULL);
-	CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_load, 0, 0, NULL);
-	//WaitForSingleObject(th[0], INFINITE);
-	//print("time2: %f\n",getTimeDifference(start,getCurrentTime()));
-	//Sleep(500);
-	//print("count: %d\n",queues_print(&path_list));
-
-	//initMqcdnMap(&map);
-	//initOSMMap(&map);
-	//initBingMap(&map);
-	//initYahooMap(&map);  //not work
-	//initYndexMap(&map);
-
+	
 	glutInitWindowSize(veiwport[0], veiwport[1]);
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE);
@@ -1129,6 +1250,42 @@ int main(int argc, char* argv[]) {
 	//glutIdleFunc(idle);
 	glutReshapeFunc(reshape);
 	glutDisplayFunc(Draw_empty/*draw*/);
+
+#if TEST_QUEUE
+	{int n;
+	queue_init(&path_list);
+	queue_init(&tex_list);
+
+	//CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_path, "d:/libs/", 0, NULL);
+	_beginthread(worker_path,0,"d:/libs/");
+	n = num_cores();
+	for (;n;n--)
+		_beginthread(worker_load,0,0);}
+#else
+	curl_global_init(CURL_GLOBAL_WIN32/*CURL_GLOBAL_DEFAULT*/);// without ssl
+
+	//initMqcdnMap(&map);
+	//initOSMMap(&map);
+	initBingMap(&map);
+	//initYahooMap(&map);  //not work
+	//initYndexMap(&map);
+	gladLoadGL();
+	prog = creatProg(vert_src,frag_src);
+	crd_setz(&center,0.5,0.5,0);
+	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
+
+	tile_init(&ttile[0],0,0,1);
+	tile_init(&ttile[1],0,1,1);
+	tile_init(&ttile[2],1,0,1);
+	tile_init(&ttile[3],1,1,1);
+	for (i=0;i<4;++i){
+		void* data = getImageData(&ttile[i]);
+		ttile[i].tex = loadGLTexture(256,256,data);
+		makeQuad(&quads[i],&ttile[i]);
+	}
+#endif
+
+	
 
 	/*{stbi_uc* data=0,*out;
 	int w,h,comp;
@@ -1148,6 +1305,7 @@ int main(int argc, char* argv[]) {
 		glutMainLoopEvent();
 
 		Render(0);
+		glutSwapBuffers();
 	}
 	print("!!! not happen\n");
 	tiles = make_list();
