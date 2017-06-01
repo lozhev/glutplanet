@@ -38,6 +38,7 @@ typedef struct Tile {
 	int y;
 	GLuint tex;
 	stbi_uc* texdata;
+	float vtx[16];
 } Tile;
 
 int cmp_tile(const void* l, const void* r) {
@@ -50,6 +51,26 @@ int cmp_tile(const void* l, const void* r) {
 	if (lsh->y<rsh->y) return -1;
 	if (lsh->y>rsh->y) return  1;
 	return 0;
+}
+
+int tile_parent(Tile* t, Tile* p) {
+	if(t->z == 0) return 0;
+
+	p->z = t->z - 1;
+	p->x = t->x / 2;
+	p->y = t->y / 2;
+	return 1;
+}
+
+int tile_quad(Tile* t) {
+	if(t->z == 0) return 0;
+
+	int xeven = (t->x & 1) == 0;
+	int yeven = (t->y & 1) == 0;
+	return
+		xeven && yeven ? 0 :
+		xeven ? 2 :
+		yeven ? 1 : 3;
 }
 
 #define _mini(a,b) (a<b?a:b)
@@ -610,6 +631,12 @@ void mapprovider_getUrlName(MapProvider* map,Tile* tile,char* url) {
 	}
 }
 
+size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+	size_t written;
+	written = fwrite(ptr, size, nmemb, stream);
+	return written;
+}
+
 stbi_uc* getImageData(Tile* tile) {
 	char filename[64];
 	stbi_uc* data=0;
@@ -617,7 +644,7 @@ stbi_uc* getImageData(Tile* tile) {
 	mapprovider_getFileName(&map,tile,filename);
 	if (exists(filename)) {
 		data = stbi_load(filename,&w,&h,&comp,0);
-	} else {
+	} /*else {
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
@@ -627,14 +654,15 @@ stbi_uc* getImageData(Tile* tile) {
 			stream=fopen(filename, "wb");
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, stream);
-			//fprintf(stderr,"download url %s\n",url);
+			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+			print("download url %s\n",url);
 			curl_easy_perform(curl);
 			fclose(stream);
 
 			data = stbi_load(filename,&w,&h,&comp,0);
 			curl_easy_cleanup(curl);
 		}
-	}
+	}*/
 	return data;
 }
 void idle(void);
@@ -1092,6 +1120,8 @@ GLuint loadGLTexture(int w, int h, void* data){
 	return tex;
 }
 
+Tile ttile[5];
+Quad quads[4];
 void makeQuad(Quad* q, Tile* t){
 	float tx, ty;
 	float* vtx = q->vtx;
@@ -1099,20 +1129,63 @@ void makeQuad(Quad* q, Tile* t){
 	float ts = (float)(256.0 * scale);
 	crd_t coord = center;
 	crd_zoomto(&coord,t->z);
-
 	tx = (float)(t->x - coord.column) * ts;
 	ty = (float)(t->y - coord.row) * ts;
-	vtx[0] =tx;    vtx[1] = ty;    vtx[2] = 0; vtx[3] = 0;
-	vtx[4] =tx;    vtx[5] = ty+ts; vtx[6] = 0; vtx[7] = 1;
-	vtx[8] =tx+ts; vtx[9] = ty;    vtx[10]= 1; vtx[11]= 0;
-	vtx[12]=tx+ts; vtx[13]= ty+ts; vtx[14]= 1; vtx[15]= 1;
 
-	q->tex = t->tex;
+	vtx[0] = tx;      vtx[1] = ty;
+	vtx[4] = tx;      vtx[5] = ty + ts;
+	vtx[8] = tx + ts; vtx[9] = ty;
+	vtx[12]= tx + ts; vtx[13]= ty + ts;
+
+	if(t->tex) {
+		vtx[2] = 0; vtx[3] = 0;
+		vtx[6] = 0; vtx[7] = 1;
+		vtx[10]= 1; vtx[11]= 0;
+		vtx[14]= 1; vtx[15]= 1;
+
+		q->tex = t->tex;
+	} else {
+		float tz = 0.5f;
+		Tile p;
+		int n = tile_quad(t);
+		tile_parent(t, &p);
+		//tile_find(tiles,&p);
+		q->tex = ttile[4].tex;
+		if(n == 0) {
+			vtx[2] = 0; vtx[3] = 0;
+			vtx[6] = 0; vtx[7] = tz;
+			vtx[10]= tz; vtx[11]= 0;
+			vtx[14]= tz; vtx[15]= tz;
+		} else if(n == 1) {
+			vtx[2] = tz; vtx[3] = 0;
+			vtx[6] = tz; vtx[7] = tz;
+			vtx[10] = 1; vtx[11] = 0;
+			vtx[14] = 1; vtx[15] = tz;
+		} else if(n == 2) {
+			vtx[2] = 0; vtx[3] = tz;
+			vtx[6] = 0; vtx[7] = 1;
+			vtx[10] = tz; vtx[11] = tz;
+			vtx[14] = tz; vtx[15] = 1;
+		} else if(n == 3) {
+			vtx[2] = tz; vtx[3] = tz;
+			vtx[6] = tz; vtx[7] = 1;
+			vtx[10] = 1; vtx[11] = tz;
+			vtx[14] = 1; vtx[15] = 1;
+		}
+	}
 }
 
-Tile ttile[4];
-Quad quads[4];
+void updateQuads() {
+	int i = 0;
+	for(i = 0; i<4; ++i) {
+		makeQuad(&quads[i], &ttile[i]);
+	}
+}
+
+//Tile ttile[5];
+//Quad quads[4];
 GLuint prog;
+GLuint u_proj;
 
 void createOrthographicOffCenter(float left, float right, float bottom, float top,
 								 float zNearPlane, float zFarPlane, float* dst) {
@@ -1136,7 +1209,7 @@ void reshape(int w, int h) {
 	if (prog){
 		createOrthographicOffCenter(-w/2.f, w/2.f, h/2.f, -h/2.f, -1, 1, m);
 		glUseProgram(prog);
-		glUniformMatrix4fv(0, 1, GL_FALSE, m);
+		glUniformMatrix4fv(u_proj, 1, GL_FALSE, m);
 	}
 }
 
@@ -1158,6 +1231,7 @@ void mouse(int button, int state, int x, int y) {
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
 		}
 		//make_tiles();
+		updateQuads();
 		//glutPostRedisplay();
 	} else if (button == 4) {
 		int zoom = (int)floor(center.zoom+0.5);
@@ -1167,6 +1241,7 @@ void mouse(int button, int state, int x, int y) {
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
 		}
 		//make_tiles();
+		updateQuads();
 		//glutPostRedisplay();
 	}
 }
@@ -1271,6 +1346,7 @@ int main(int argc, char* argv[]) {
 	//initYndexMap(&map);
 	gladLoadGL();
 	prog = creatProg(vert_src,frag_src);
+	u_proj = glGetUniformLocation(prog, "u_proj");
 	crd_setz(&center,0.5,0.5,0);
 	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
 
@@ -1278,9 +1354,12 @@ int main(int argc, char* argv[]) {
 	tile_init(&ttile[1],0,1,1);
 	tile_init(&ttile[2],1,0,1);
 	tile_init(&ttile[3],1,1,1);
+	tile_init(&ttile[4],0,0,0);
+	
+	ttile[4].tex = loadGLTexture(256, 256, getImageData(&ttile[4]));
 	for (i=0;i<4;++i){
 		void* data = getImageData(&ttile[i]);
-		ttile[i].tex = loadGLTexture(256,256,data);
+		if (data) ttile[i].tex = loadGLTexture(256,256,data);
 		makeQuad(&quads[i],&ttile[i]);
 	}
 #endif
