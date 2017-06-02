@@ -33,13 +33,23 @@ void print(const char* format, ...) {
 
 // Tile
 typedef struct Tile {
-	int z;
+	int z;            // level
 	int x;
 	int y;
-	GLuint tex;
-	stbi_uc* texdata;
-	float vtx[16];
+	GLuint tex;       // texture
+	GLuint ptex;      // parent texture
+	stbi_uc* texdata; // image
+	float vtx[16];    // vertices
 } Tile;
+
+void tile_init(Tile* t,int x,int y,int z){
+	t->x = x;
+	t->y = y;
+	t->z = z;
+	t->tex = 0;
+	t->ptex = 0;
+	t->texdata = 0;
+}
 
 int cmp_tile(const void* l, const void* r) {
 	const Tile* lsh = (const Tile*)l;
@@ -54,7 +64,7 @@ int cmp_tile(const void* l, const void* r) {
 }
 
 int tile_parent(Tile* t, Tile* p) {
-	if(t->z == 0) return 0;
+	//if(t->z == 0) return 0;
 
 	p->z = t->z - 1;
 	p->x = t->x / 2;
@@ -63,15 +73,17 @@ int tile_parent(Tile* t, Tile* p) {
 }
 
 int tile_quad(Tile* t) {
+	int xeven,yeven;
 	if(t->z == 0) return 0;
 
-	int xeven = (t->x & 1) == 0;
-	int yeven = (t->y & 1) == 0;
-	return
-		xeven && yeven ? 0 :
-		xeven ? 2 :
-		yeven ? 1 : 3;
+	xeven = (t->x & 1) == 0;
+	yeven = (t->y & 1) == 0;
+	return xeven && yeven ? 0 : xeven ? 2 : yeven ? 1 : 3;
 }
+
+int tile_make(Tile* t);
+int tile_make_tex(Tile* t);
+
 
 #define _mini(a,b) (a<b?a:b)
 #define _maxi(a,b) (a>b?a:b)
@@ -302,7 +314,7 @@ void destroy_synclist(SyncTileList* list) {
 }
 
 void print_tile(Tile* item) {
-	fprintf(stderr,"Tile: %p z: %d x: %d y: %d\n",item,item->z,item->x,item->y);
+	print("Tile: %p z: %d x: %d y: %d\n",item,item->z,item->x,item->y);
 }
 
 void print_list(TileList* list) {
@@ -336,9 +348,14 @@ typedef struct{
 	short w,h;
 }TexData;
 
-void queue_init(Queue *q){
+Queue* make_queue(){
+	Queue *q = malloc(sizeof(Queue));
+	q->first=0;
+	q->last=0;
+	q->count=0;
 	mtx_init(&q->mtx, 1);
 	cnd_init(&q->cnd);
+	return q;
 }
 
 void queue_push(Queue* q,void* data){
@@ -411,6 +428,16 @@ void* queue_pop_wait(Queue* q) {
 	return ret;
 }
 
+Tile* tile_find(const Queue* q, Tile* tile) {
+	const Node* cur = q->first;
+	while (cur) {
+		Tile* t = (Tile*)cur->data;
+		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) return t;
+		cur = cur->next;
+	}
+	return 0;
+}
+
 typedef struct {
 	float vtx[16];
 	GLuint tex;
@@ -474,11 +501,14 @@ typedef struct MapProvider {
 crd_t center;
 int veiwport[2]= {800,600};
 
-TileList* tiles;
+//TileList* tiles;
+Queue* tiles;
+Queue* tiles_load;
+Queue* tiles_loaded;
 SyncTileList* tiles_get;
 Tile* tiles_draw[64];
 int tiles_draw_count = 0;
-Tile* tiles_loaded[256];
+//Tile* tiles_loaded[256];
 int tiles_loaded_count = 0;
 MapProvider map;
 
@@ -674,7 +704,7 @@ int worker_thread(void* arg) {
 		stbi_uc* data = getImageData(tile);
 		mtx_lock(&mtx);
 		tile->texdata = data;
-		tiles_loaded[tiles_loaded_count++] = tile;
+		//tiles_loaded[tiles_loaded_count++] = tile;
 		//glutPostRedisplay();
 		mtx_unlock(&mtx);
 	}
@@ -738,26 +768,30 @@ void make_tiles() {
 	for (; col <= maxCol; ++col) {
 		int row = minRow;
 		for (; row <= maxRow; ++row) {
-			Tile tile = {baseZoom,col,row};
+			Tile tile = {baseZoom,col,row};			
+			Tile* ret = tile_find(tiles,&tile);
 			//print_tile(&tile);
-			Tile* ret = find_tile(tiles,&tile);
 			if (ret==0) {
+				int m;
 				Tile* newtile = (Tile*)malloc(sizeof(Tile));
-				newtile->z = tile.z;
-				newtile->x = tile.x;
-				newtile->y = tile.y;
-				getImageTile(newtile);
-				push_list(tiles,newtile);
+				tile_init(newtile, tile.x, tile.y, tile.z);
+				m = tile_make(newtile);
+				//newtile->tex = loadGLTexture(256, 256, getImageData(newtile));
+				//getImageTile(newtile);
+				//push_list(tiles,newtile);
+				queue_insert(tiles,newtile);
+				queue_insert(tiles_load,newtile);
 				//fprintf(stderr,"push tiles count: %ld\n",tiles->count);
-				ret = newtile;
+				if (m) tiles_draw[tiles_draw_count++] = newtile;
 
 				if (tiles->count > 256){
-					pop_tile(tiles);// TODO: remove tile in tiles_get
+					//pop_tile(tiles);// TODO: remove tile in tiles_get
 					//fprintf(stderr,"pop tiles count: %ld\n",tiles->count);
 				}
 				//++counter;
+			} else {
+				tiles_draw[tiles_draw_count++] = ret;
 			}
-			tiles_draw[tiles_draw_count++] = ret;
 		}
 	}
 
@@ -867,9 +901,8 @@ void draw(void) {
 }
 
 void idle(void) {
-	//struct timespec s;
 	if (tiles_loaded_count>0) {
-		Tile* tile = tiles_loaded[--tiles_loaded_count];
+		Tile* tile = 0;//tiles_loaded[--tiles_loaded_count];
 		GLuint textureId;
 		glGenTextures(1, &textureId);
 		glBindTexture(GL_TEXTURE_2D, textureId);
@@ -884,9 +917,6 @@ void idle(void) {
 		glutPostRedisplay();
 		return;
 	}
-	//s.tv_nsec = 50;
-	//thrd_sleep(&s,0);
-	Sleep(50);
 }
 
 #if _MSC_VER < 1900
@@ -897,7 +927,7 @@ double log2(double Value) {
 
 void do_exit(void){
 	//destroy_synclist(tiles_get);
-	clear_list(tiles);
+//	clear_list(tiles);
 	//destroy_list(tiles);
 	//destroyMap(&map);
 }
@@ -1145,13 +1175,26 @@ void makeQuad(Quad* q, Tile* t){
 
 		q->tex = t->tex;
 	} else {
-		float tz = 0.5f;
+		float tz = 1.f;
 		Tile p;
+		float fx1,fy1,fx2,fy2;
 		int n = tile_quad(t);
 		tile_parent(t, &p);
 		//tile_find(tiles,&p);
 		q->tex = ttile[4].tex;
-		if(n == 0) {
+		tz *= 0.5f;
+		tx = n%2 * tz;
+		ty = n/2 * tz;
+		fx1 = tx;
+		fx2 = tx + tz;
+		fy1 = ty;
+		fy2 = ty + tz;
+		//print("n: %d fx1: %f fy1: %f fx2: %f fy2: %f\n",n , fx1, fy1, fx2, fy2);
+		vtx[2] = fx1; vtx[3] = fy1;
+		vtx[6] = fx1; vtx[7] = fy2;
+		vtx[10]= fx2; vtx[11]= fy1;
+		vtx[14]= fx2; vtx[15]= fy2;
+		/*if(n == 0) {
 			vtx[2] = 0; vtx[3] = 0;
 			vtx[6] = 0; vtx[7] = tz;
 			vtx[10]= tz; vtx[11]= 0;
@@ -1171,14 +1214,69 @@ void makeQuad(Quad* q, Tile* t){
 			vtx[6] = tz; vtx[7] = 1;
 			vtx[10] = 1; vtx[11] = tz;
 			vtx[14] = 1; vtx[15] = 1;
-		}
+		}*/
 	}
+}
+
+
+int tile_make(Tile* t){
+	float tx, ty;
+	float* vtx = t->vtx;
+	double scale = pow(2.0, center.zoom - t->z);
+	float ts = (float)(256.0 * scale);
+	crd_t coord = center;
+	crd_zoomto(&coord,t->z);
+	tx = (float)(t->x - coord.column) * ts;
+	ty = (float)(t->y - coord.row) * ts;
+
+	vtx[0] = tx+2;      vtx[1] = ty+2;
+	vtx[4] = tx+2;      vtx[5] = ty + ts-2;
+	vtx[8] = tx + ts-2; vtx[9] = ty+2;
+	vtx[12]= tx + ts-2; vtx[13]= ty + ts-2;
+
+	if(t->tex) {
+		vtx[2] = 0; vtx[3] = 0;
+		vtx[6] = 0; vtx[7] = 1;
+		vtx[10]= 1; vtx[11]= 0;
+		vtx[14]= 1; vtx[15]= 1;
+
+		//q->tex = t->tex;
+	} else {
+		float tz = .5f;
+		Tile r,*p;
+		float fx1,fy1,fx2,fy2;
+		tile_parent(t, &r);
+		p = tile_find(tiles,&r);
+		while(p && !p->tex){
+			//print_tile(p);
+			tile_parent(p, &r);
+			p = tile_find(tiles,&r);
+			tz *= 0.5f;
+		};
+		if (p==0) return 0;
+		t->ptex = p->tex;
+		tx = t->x * tz;
+		ty = t->y * tz;
+		fx1 = tx;
+		fx2 = tx + tz;
+		fy1 = ty;
+		fy2 = ty + tz;
+		//print_tile(t);
+		//print("fx1: %f fy1: %f fx2: %f fy2: %f\n", fx1, fy1, fx2, fy2);
+		vtx[2] = fx1; vtx[3] = fy1;
+		vtx[6] = fx1; vtx[7] = fy2;
+		vtx[10]= fx2; vtx[11]= fy1;
+		vtx[14]= fx2; vtx[15]= fy2;
+		return 1;
+	}
+	return 0;
 }
 
 void updateQuads() {
 	int i = 0;
-	for(i = 0; i<4; ++i) {
-		makeQuad(&quads[i], &ttile[i]);
+	for (i=0; i<tiles_draw_count; ++i) {
+		Tile* t = tiles_draw[i];
+		tile_make(t);
 	}
 }
 
@@ -1229,6 +1327,7 @@ void mouse(int button, int state, int x, int y) {
 		if(lastzoom!=zoom){
 			lastzoom = zoom;
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
+			make_tiles();
 		}
 		//make_tiles();
 		updateQuads();
@@ -1239,6 +1338,7 @@ void mouse(int button, int state, int x, int y) {
 		if(lastzoom!=zoom){
 			lastzoom = zoom;
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
+			make_tiles();
 		}
 		//make_tiles();
 		updateQuads();
@@ -1259,16 +1359,51 @@ void mousemove(int x,int y) {
 	//glutPostRedisplay();
 }
 
+int tile_make_tex(Tile* t){
+	GLuint textureId;
+	float* vtx = t->vtx;
+	glGenTextures(1, &textureId);
+	glBindTexture(GL_TEXTURE_2D, textureId);
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	free(t->texdata);
+	t->tex = textureId;
+	vtx[2] = 0; vtx[3] = 0;
+	vtx[6] = 0; vtx[7] = 1;
+	vtx[10]= 1; vtx[11]= 0;
+	vtx[14]= 1; vtx[15]= 1;
+	return 1;
+}
+
+void worker_load(void* param){
+	while(1){
+		Tile* t = queue_pop_wait(tiles_load);
+		t->texdata = getImageData(t);
+		if (t->texdata) queue_insert(tiles_loaded,t);
+	}
+}
+
 void Render(float f){
 	int i;
+	GLuint ltex=-1;
+	Tile* t = queue_pop(tiles_loaded);
+	while (t /*&& i<4*/){
+		tile_make_tex(t);
+		t = queue_pop(tiles_loaded);
+	}
+
 	glClear(GL_COLOR_BUFFER_BIT);
 
 //	glColor3f( 1.0f, 1.0f, 1.0f );
 	glEnable(GL_TEXTURE_2D);
-	for (i=0; i<4/*tiles_draw_count*/; ++i) {
-		/*Tile* t = tiles_draw[i];
+	glEnableVertexAttribArray(0);
+	for (i=0; i<tiles_draw_count; ++i) {
+		Tile* t = tiles_draw[i];
 
-		double scale = pow(2.0, center.zoom - t->z);
+		/*double scale = pow(2.0, center.zoom - t->z);
 		double ts = 256.0 * scale;
 		crd_t coord = center;
 		crd_zoomto(&coord,t->z);
@@ -1283,9 +1418,17 @@ void Render(float f){
 		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
 		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
 		glEnd();*/
-		glBindTexture(GL_TEXTURE_2D,quads[i].tex);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,quads[i].vtx);
+		if (t->tex){
+			glBindTexture(GL_TEXTURE_2D,t->tex);
+			ltex = t->tex;
+		} else {
+			if (ltex != t->ptex){
+				glBindTexture(GL_TEXTURE_2D,t->ptex);
+				ltex = t->ptex;
+			}
+		}
+
+		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
 }
@@ -1303,12 +1446,6 @@ int num_cores(){
 #error "platform error"
 #endif
 } 
-
-void tile_init(Tile* t,int x,int y,int z){
-	t->x = x;
-	t->y = y;
-	t->z = z;
-}
 
 int main(int argc, char* argv[]) {
 	int i;
@@ -1337,7 +1474,7 @@ int main(int argc, char* argv[]) {
 	for (;n;n--)
 		_beginthread(worker_load,0,0);}
 #else
-	curl_global_init(CURL_GLOBAL_WIN32/*CURL_GLOBAL_DEFAULT*/);// without ssl
+	curl_global_init(CURL_GLOBAL_WIN32);
 
 	//initMqcdnMap(&map);
 	//initOSMMap(&map);
@@ -1349,19 +1486,48 @@ int main(int argc, char* argv[]) {
 	u_proj = glGetUniformLocation(prog, "u_proj");
 	crd_setz(&center,0.5,0.5,0);
 	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
+	lastzoom = (int)floor(center.zoom+0.5);
 
-	tile_init(&ttile[0],0,0,1);
-	tile_init(&ttile[1],0,1,1);
-	tile_init(&ttile[2],1,0,1);
-	tile_init(&ttile[3],1,1,1);
-	tile_init(&ttile[4],0,0,0);
 	
-	ttile[4].tex = loadGLTexture(256, 256, getImageData(&ttile[4]));
-	for (i=0;i<4;++i){
+
+	{Tile* t;
+	Node* n;
+	tiles = make_queue();
+	tiles_load = make_queue();
+	tiles_loaded = make_queue();
+	_beginthread(worker_load,0,0);
+	/*t = malloc(sizeof(Tile));
+	tile_init(t,0,0,1); queue_push(tiles,t);
+	t = malloc(sizeof(Tile));
+	tile_init(t,1,0,1); queue_push(tiles,t);
+	t = malloc(sizeof(Tile));
+	tile_init(t,0,1,1); queue_push(tiles,t);
+	t = malloc(sizeof(Tile));
+	tile_init(t,1,1,1); queue_push(tiles,t);*/
+	t = malloc(sizeof(Tile));
+	tile_init(t,0,0,0); queue_push(tiles,t);
+	t->tex = loadGLTexture(256, 256, getImageData(t));
+	
+	/*n = tiles->first;
+	while(n){
+		void* img;
+		t = n->data;
+
+		img = getImageData(t);
+		if (img) t->tex = loadGLTexture(256,256,img);
+		tile_make(t);
+
+		n = n->next;
+	}*/
+	make_tiles();
+	}
+	
+	/*ttile[4].tex = loadGLTexture(256, 256, getImageData(&ttile[4]));
+	for (i=0;i<tiles.count;++i){
 		void* data = getImageData(&ttile[i]);
 		if (data) ttile[i].tex = loadGLTexture(256,256,data);
 		makeQuad(&quads[i],&ttile[i]);
-	}
+	}*/
 #endif
 
 	
@@ -1387,7 +1553,7 @@ int main(int argc, char* argv[]) {
 		glutSwapBuffers();
 	}
 	print("!!! not happen\n");
-	tiles = make_list();
+//	tiles = make_list();
 	tiles_get = make_synclist();
 	thrd_create(&thrd1,worker_thread,0);
 	thrd_create(&thrd2,worker_thread,0);
