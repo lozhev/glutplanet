@@ -254,7 +254,7 @@ int clamp(int n, int lower, int upper) {
 
 // Queue
 typedef struct Node{
-	void* data;
+	char* data;
 	struct Node* next, *prev;
 }Node;
 
@@ -609,7 +609,7 @@ stbi_uc* getImageData(Tile* tile) {
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
-			char tmp[16];
+			char tmp[L_tmpnam];
 			FILE* stream=0;
 			mapprovider_getUrlName(&map,tile,url);
 			mkpath(filename);
@@ -652,7 +652,7 @@ void to_draw(int z, int x, int y) {
 			//fprintf(stderr,"pop tiles count: %ld\n",tiles->count);
 		}
 	} else {
-		tile_tofirst(tiles_load,ret);
+		//tile_tofirst(tiles_load,ret);
 		tiles_draw[tiles_draw_count++] = ret;
 	}
 }
@@ -739,47 +739,29 @@ void make_tiles() {
 		}
 	}*/
 	{
-		int j, dir=1;
-		int SX=(maxCol - minCol)+1;
-		int SY=(maxRow - minRow)+1;
-		int fx = (SX / 2)-!(SX & 1);
-		int fy = (SY / 2)-!(SY & 1);
-		int x = maxCol;
-		int y = minRow;
-		int nx=SX,ny=SY;
-		int n = nx*ny;
-		while(n>0){
-			for(j=0;j<ny-1;++j){
-				to_draw(baseZoom,x,y++);
-				n--;
-			}
-			for(j=0;j<nx-1;++j){
-				to_draw(baseZoom,x--,y);
-				n--;
-			}
-			for(j=0;j<ny-1;++j){
-				to_draw(baseZoom,x,y--);
-				n--;
-			}
-			for(j=0;j<nx-1;++j){
-				to_draw(baseZoom,x++,y);
-				n--;
-			}
-			x--;
-			y++;
-
-			nx -= 2;
-			ny -= 2;
-
-			if (nx == 1 || ny == 1){
-				int s,sx=0,sy=0;
-				if (nx<ny){s=nx;sx=1;}
-				else {s=ny;sy=1;}
-				for(j=0;j<s;++j){
-					to_draw(baseZoom,x+j*sx,y+j*sy);
-					n--;
-				}
-			}
+		int j;
+		int nx = maxCol;
+		int ny = maxRow;
+		int sx = minCol;
+		int sy = minRow;
+		int n = (nx-sx+1)*(ny-sy+1);
+		while(n>0) {
+			for(j = sy; j <= ny; ++j) {
+				to_draw(baseZoom, nx, j); --n;
+			} if(!n) { break; print("area: %dx%d not happen??\n", (nx - sx + 1), (ny - sy + 1)); }
+			nx--;
+			for(j = nx; j >= sx; --j) {
+				to_draw(baseZoom, j, ny); --n;
+			} if(!n) { break; print("area: %dx%d not happen??\n", (nx - sx + 1), (ny - sy + 1)); }
+			ny--;
+			for(j = ny; j >= sy; --j) {
+				to_draw(baseZoom, sx, j); --n;
+			} if(!n) { break; print("area: %dx%d not happen??\n", (nx - sx + 1), (ny - sy + 1)); }
+			sx++;
+			for(j = sx; j <= nx; ++j) {
+				to_draw(baseZoom, j, sy); --n;
+			} if(!n) { break; print("area: %dx%d not happen??\n", (nx - sx + 1), (ny - sy + 1)); }
+			sy++;
 		}
 	}
 }
@@ -1131,8 +1113,9 @@ void mouse(int button, int state, int x, int y) {
 		crd_zoomby(&center,0.05);
 		if(lastzoom!=zoom){
 			lastzoom = zoom;
-			make_tiles();
+			//make_tiles();
 		}
+		make_tiles();
 		updateQuads();
 	} else if (button == 4) {
 		int zoom = (int)floor(center.zoom+0.5);
@@ -1140,8 +1123,9 @@ void mouse(int button, int state, int x, int y) {
 		if(lastzoom!=zoom){
 			lastzoom = zoom;
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
-			make_tiles();
+			//make_tiles();
 		}
+		make_tiles();
 		updateQuads();
 	}
 }
@@ -1230,13 +1214,29 @@ int num_cores(){
 #error "platform error"
 #endif
 } 
-
+void q_tof(Queue* q, char*c) {
+	Node* cur = q->first;
+	int has = 0;
+	while(cur) {
+		if(strstr(cur->data, c)) { has = 1; break; }
+		cur = cur->next;
+	}
+	cur->next = q->first;
+	q->first = cur;
+}
 int main(int argc, char* argv[]) {
 	int i;
 //	thrd_t thrd1,thrd2,thrd3,thrd4;
-	//FILE* stream;
+	Queue* q;
 	time_t tm;
 	srand((unsigned int)time(&tm));
+	q = make_queue();
+	queue_insert(q, "3");
+	queue_insert(q, "2");
+	queue_insert(q, "1");
+	queue_insert(q, "0");
+
+	q_tof(q, "1");
 
 	glutInitWindowSize(veiwport[0], veiwport[1]);
 	glutInit(&argc, argv);
@@ -1276,7 +1276,7 @@ int main(int argc, char* argv[]) {
 	tiles = make_queue();
 	tiles_load = make_queue();
 	tiles_loaded = make_queue();
-	i = 8;//num_cores();
+	i = 8;// num_cores();
 	while(i--) _beginthread(worker_load, 0, 0);
 	
 	make_tiles();
