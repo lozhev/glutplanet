@@ -5,8 +5,6 @@
 #include <stdio.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-#define STB_IMAGE_RESIZE_IMPLEMENTATION
-#include "stb_image_resize.h"
 #include <curl/curl.h>
 #include "tinycthread.h"
 #include <search.h>
@@ -170,30 +168,12 @@ typedef struct TileList {
 	TileNode* last;
 } TileList;
 
-typedef struct SyncTileList {
-	size_t count;
-	TileNode* first;
-	TileNode* last;
-	mtx_t mtx;
-	cnd_t cnd;
-} SyncTileList;
-
 TileList* make_list() {
 	//return (TileList*)calloc(1,sizeof(TileList));
 	TileList* tl = (TileList*)malloc(sizeof(TileList));
 	tl->count = 0;
 	tl->first = 0;
 	tl->last = 0;
-	return tl;
-}
-
-SyncTileList* make_synclist() {
-	SyncTileList* tl = (SyncTileList*)malloc(sizeof(SyncTileList));
-	tl->count = 0;
-	tl->first = 0;
-	tl->last = 0;
-	mtx_init(&tl->mtx,1);// 1 or 8??
-	cnd_init(&tl->cnd);
 	return tl;
 }
 
@@ -213,43 +193,6 @@ void push_list(TileList* list,Tile* tile) {
 	++list->count;
 }
 
-void push_synclist(SyncTileList* list,Tile* tile) {
-	TileNode* node = (TileNode*)malloc(sizeof(TileNode));
-	node->tile = tile;
-	node->next=0;
-	node->prev=0;
-	mtx_lock(&list->mtx); // call from main thread..
-	if (list->last==0) {
-		list->first = node;
-		list->last = node;
-	} else {
-		list->last->next = node;
-		node->prev = list->last;
-		list->last = node;
-	}
-	++list->count;
-	mtx_unlock(&list->mtx);
-	cnd_signal(&list->cnd);
-}
-
-Tile* tile_wait_pull(SyncTileList* list){
-	Tile* tile;
-	TileNode* node;
-	mtx_lock(&list->mtx);
-	while(list->count==0){
-		cnd_wait(&list->cnd,&list->mtx);
-	}
-
-	node = list->first;
-	tile = node->tile;
-	list->first = node->next;
-	if (--list->count == 0) list->last=0;
-
-	mtx_unlock(&list->mtx);
-	free(node);
-	return tile;
-}
-
 void pop_tile(TileList* list) {
 	TileNode* node = list->first;
 	Tile* tile = node->tile;
@@ -261,16 +204,6 @@ void pop_tile(TileList* list) {
 	free(node);
 	--list->count;
 }
-
-/*int tile_cmp(const Tile* l, const Tile* r) {
-	if (l->z < r->z) return -1;
-	if (l->z > r->z) return  1;
-	if (l->x < r->x) return -1;
-	if (l->x > r->x) return  1;
-	if (l->y < r->y) return -1;
-	if (l->y > r->y) return  1;
-	return 0;
-}*/
 
 Tile* find_tile(const TileList* list, Tile* tile) {
 	const TileNode* cur = list->first;
@@ -303,16 +236,6 @@ void destroy_list(TileList* list) {
 	free(list);
 }
 
-void destroy_synclist(SyncTileList* list) {
-	TileNode* cur = list->first;
-	while (cur) {
-		if (cur->prev) free(cur->prev);
-		cur = cur->next;
-	}
-	free(list->last);
-	free(list);
-}
-
 void print_tile(Tile* item) {
 	print("Tile: %p z: %d x: %d y: %d\n",item,item->z,item->x,item->y);
 }
@@ -332,7 +255,7 @@ int clamp(int n, int lower, int upper) {
 // Queue
 typedef struct Node{
 	void* data;
-	struct Node* next;
+	struct Node* next, *prev;
 }Node;
 
 typedef struct{
@@ -343,17 +266,12 @@ typedef struct{
 	int count;
 }Queue;
 
-typedef struct{
-	void* data;
-	short w,h;
-}TexData;
-
 Queue* make_queue(){
 	Queue *q = malloc(sizeof(Queue));
 	q->first=0;
 	q->last=0;
 	q->count=0;
-	mtx_init(&q->mtx, 1);
+	mtx_init(&q->mtx, 1|mtx_recursive);
 	cnd_init(&q->cnd);
 	return q;
 }
@@ -364,8 +282,10 @@ void queue_push(Queue* q,void* data){
 	mtx_lock(&q->mtx);
 	if (q->last){
 		q->last->next = n;
+		n->prev = q->last;
 	} else {
 		q->first = n;
+		n->prev = 0;
 	}
 	n->next = 0;
 	q->last = n;
@@ -381,9 +301,11 @@ void queue_insert(Queue* q,void* data){
 	if (q->count){
 		n->next = q->first;
 		q->first = n;
+		//n->prev = q->last;
 	} else {
 		q->first = n;
 		n->next = 0;
+		//q->last = n;
 	}
 	++q->count;
 	mtx_unlock(&q->mtx);
@@ -438,10 +360,22 @@ Tile* tile_find(const Queue* q, Tile* tile) {
 	return 0;
 }
 
-typedef struct {
-	float vtx[16];
-	GLuint tex;
-}Quad;
+void tile_tofirst(Queue* q, Tile* tile) {
+	Node* cur = q->first;
+	int has=0;
+	//mtx_lock(&q->mtx);
+	while (cur) {
+		Tile* t = (Tile*)cur->data;
+		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) { has=1; break; }
+		cur = cur->next;
+	}
+	if(!has || q->first==cur) return;
+	//mtx_lock(&q->mtx);
+	cur->next = q->first;
+	q->first = cur;
+	//mtx_unlock(&q->mtx);
+	return;
+}
 
 // IO funcs
 #ifndef _WIN32
@@ -501,15 +435,12 @@ typedef struct MapProvider {
 crd_t center;
 int veiwport[2]= {800,600};
 
-//TileList* tiles;
 Queue* tiles;
 Queue* tiles_load;
 Queue* tiles_loaded;
-SyncTileList* tiles_get;
 Tile* tiles_draw[64];
 int tiles_draw_count = 0;
-//Tile* tiles_loaded[256];
-int tiles_loaded_count = 0;
+
 MapProvider map;
 
 void initMqcdnMap(MapProvider* map) {
@@ -678,18 +609,19 @@ stbi_uc* getImageData(Tile* tile) {
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
+			char tmp[16];
 			FILE* stream=0;
-			CURLcode ret;
 			mapprovider_getUrlName(&map,tile,url);
 			mkpath(filename);
-			stream=fopen(filename, "wb");
+			tmpnam(tmp);
+			stream=fopen(tmp, "wb");
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, stream);
 			//curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
 			//print("download url %s\n",url);
-			ret = curl_easy_perform(curl);
-			if(ret) print("ret: %d %s\n",ret,curl_easy_strerror(ret));
+			curl_easy_perform(curl);
 			fclose(stream);
+			rename(tmp,filename);
 
 			data = stbi_load(filename,&w,&h,&comp,0);
 			curl_easy_cleanup(curl);
@@ -697,30 +629,7 @@ stbi_uc* getImageData(Tile* tile) {
 	}
 	return data;
 }
-void idle(void);
-int worker_thread(void* arg) {
-	mtx_t mtx;
-	mtx_init(&mtx,1);
-	while (1) {
-		Tile* tile = tile_wait_pull(tiles_get);
-		stbi_uc* data = getImageData(tile);
-		mtx_lock(&mtx);
-		tile->texdata = data;
-		//tiles_loaded[tiles_loaded_count++] = tile;
-		//glutPostRedisplay();
-		mtx_unlock(&mtx);
-	}
-	return 0;
-}
 
-void getImageTile(Tile* tile) {
-	tile->tex = 0;
-	tile->texdata = 0;
-	push_synclist(tiles_get,tile);
-}
-/*double round(double d){
-	return floor(d + 0.5);
-}*/
 void to_draw(int z, int x, int y) {
 	Tile tile = {z,x,y};
 	Tile* ret = tile_find(tiles, &tile);
@@ -736,20 +645,19 @@ void to_draw(int z, int x, int y) {
 		queue_insert(tiles, newtile);
 		queue_insert(tiles_load, newtile);
 		//fprintf(stderr,"push tiles count: %ld\n",tiles->count);
-		/*if (m)*/ tiles_draw[tiles_draw_count++] = newtile;
+		tiles_draw[tiles_draw_count++] = newtile;
 
 		if(tiles->count > 256) {
 			//pop_tile(tiles);// TODO: remove tile in tiles_get
 			//fprintf(stderr,"pop tiles count: %ld\n",tiles->count);
 		}
-		//++counter;
 	} else {
+		tile_tofirst(tiles_load,ret);
 		tiles_draw[tiles_draw_count++] = ret;
 	}
 }
-//int counter=0;
+
 void make_tiles() {
-	//int baseZoom = clamp(round(center.zoom), 0, 18);
 	int baseZoom = clamp((int)floor(center.zoom+0.5), 0, 18);
 
 	double tl[2]= {0,0};
@@ -891,112 +799,6 @@ double getyp(double lat,double pzoom){
 	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) /2 * pzoom;
 }
 
-void draw(void) {
-//	int i;
-//	double tx;
-//	double ty;
-//	double powz;
-	//bound srtm_04_01.tif
-/*	double p[][2]={
-		{-165.0,60.0},
-		{-165.0+5.0,60.0},
-		{-165.0+5.0,60.0-5.0},
-		{-165.0,60.0-5.0}
-	};*/
-//	double point[2];
-
-	//idle();
-
-	glClear(GL_COLOR_BUFFER_BIT);
-
-	/*glColor3f( 1.0f, 1.0f, 1.0f );
-	glEnable(GL_TEXTURE_2D);
-	for (i=0; i<tiles_draw_count; ++i) {
-		Tile* t = tiles_draw[i];
-
-		double scale = pow(2.0, center.zoom - t->z);
-		double ts = 256.0 * scale;
-		crd_t coord = center;
-		crd_zoomto(&coord,t->z);
-
-		tx = (t->x - coord.column) * ts;
-		ty = (t->y - coord.row) * ts;
-
-		glBindTexture(GL_TEXTURE_2D, t->tex);
-		glBegin(GL_TRIANGLE_STRIP);
-		glVertex2d(tx, ty); glTexCoord2f(0, 1);
-		glVertex2d(tx, ty+ts); glTexCoord2f(1, 0);
-		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
-		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
-		glEnd();
-	}
-
-	powz = pow(2, center.zoom);
-	glColor3f( 1.0f, 0.0f, 0.0f );
-	glDisable(GL_TEXTURE_2D);
-	glBegin(GL_LINES);
-	for (i = 0; i < 6000-1; ++i) {
-		point[0] = getxp(p[0][0],powz);
-		point[1] = getyp(p[0][1]-i*5.0/6000.0,powz);
-		point[0] = 256.0 * (point[0] - center.column);
-		point[1] = 256.0 * (point[1] - center.row);
-		glVertex2d(point[0], point[1]);
-
-		point[0] = getxp(p[1][0],powz);
-		point[1] = getyp(p[0][1]-i*5.0/6000.0,powz);
-		point[0] = 256.0 * (point[0] - center.column);
-		point[1] = 256.0 * (point[1] - center.row);
-		glVertex2d(point[0], point[1]);
-	}
-	for (i = 0; i < 6000-1; ++i) {
-		point[0] = getxp(p[0][0]+i*5.0/6000.0,powz);
-		point[1] = getyp(p[0][1],powz);
-		point[0] = 256.0 * (point[0] - center.column);
-		point[1] = 256.0 * (point[1] - center.row);
-		glVertex2d(point[0], point[1]);
-
-		point[0] = getxp(p[0][0]+i*5.0/6000.0,powz);
-		point[1] = getyp(p[2][1],powz);
-		point[0] = 256.0 * (point[0] - center.column);
-		point[1] = 256.0 * (point[1] - center.row);
-		glVertex2d(point[0], point[1]);
-	}
-	glEnd();
-
-	glColor3f( 1.0f, 1.0f, 0.0f );
-	glDisable(GL_TEXTURE_2D);
-	glBegin(GL_LINE_STRIP);
-	for (i = 0; i < 4; ++i) {
-		point[0] = getxp(p[i][0],powz);
-		point[1] = getyp(p[i][1],powz);
-		point[0] = 256.0 * (point[0] - center.column);
-		point[1] = 256.0 * (point[1] - center.row);
-		glVertex2d(point[0], point[1]);
-	}
-	glEnd();*/
-
-	glutSwapBuffers();
-}
-
-void idle(void) {
-	if (tiles_loaded_count>0) {
-		Tile* tile = 0;//tiles_loaded[--tiles_loaded_count];
-		GLuint textureId;
-		glGenTextures(1, &textureId);
-		glBindTexture(GL_TEXTURE_2D, textureId);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, tile->texdata);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		//printf("free texdata: %p\n",tile->texdata);
-		free(tile->texdata);//FIXME: corrupted double-linked list
-		tile->tex = textureId;
-		glutPostRedisplay();
-		return;
-	}
-}
-
 #if _MSC_VER < 1900
 double log2(double Value) {
 	return log(Value) * (1.4426950408889634073599246810019);
@@ -1010,28 +812,18 @@ void do_exit(void){
 	//destroyMap(&map);
 }
 
-/*static double inv_freq;
-
-void initTime(){
-	LARGE_INTEGER freq;
-	QueryPerformanceFrequency(&freq);
-	inv_freq = 1.0 / (double)freq.QuadPart;
-}
-
-LARGE_INTEGER getCurrentTime(){
-	LARGE_INTEGER curr;
-	QueryPerformanceCounter(&curr);
-	return curr;
-}
-
-float getTimeDifference(const LARGE_INTEGER from, const LARGE_INTEGER to)
-{
-	long long diff = to.QuadPart - from.QuadPart;
-	return (float) ((double)(diff) * inv_freq);
-}*/
-
 //#define TEST_QUEUE 1
 #if TEST_QUEUE
+typedef struct {
+	float vtx[16];
+	GLuint tex;
+}Quad;
+
+typedef struct{
+	void* data;
+	short w,h;
+}TexData;
+
 Queue path_list;
 Queue tex_list;
 
@@ -1239,18 +1031,16 @@ int tile_make(Tile* t){
 	tx = (float)(t->x - coord.column) * ts;
 	ty = (float)(t->y - coord.row) * ts;
 
-	vtx[0] = tx+2;      vtx[1] = ty+2;
-	vtx[4] = tx+2;      vtx[5] = ty + ts-2;
-	vtx[8] = tx + ts-2; vtx[9] = ty+2;
-	vtx[12]= tx + ts-2; vtx[13]= ty + ts-2;
+	vtx[0] = tx;      vtx[1] = ty;
+	vtx[4] = tx;      vtx[5] = ty + ts;
+	vtx[8] = tx + ts; vtx[9] = ty;
+	vtx[12]= tx + ts; vtx[13]= ty + ts;
 
 	if(t->tex) {
 		vtx[2] = 0; vtx[3] = 0;
 		vtx[6] = 0; vtx[7] = 1;
 		vtx[10]= 1; vtx[11]= 0;
 		vtx[14]= 1; vtx[15]= 1;
-
-		//q->tex = t->tex;
 	} else {
 		int found = 0;
 		float tz = .5f;
@@ -1319,9 +1109,6 @@ void createOrthographicOffCenter(float left, float right, float bottom, float to
 void reshape(int w, int h) {
 	float m[16];
 	glViewport(0, 0, w, h);
-	/*glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	glOrtho(-w/2, w/2, h/2, -h/2, -1, 1);*/
 	if (prog){
 		createOrthographicOffCenter(-w/2.f, w/2.f, h/2.f, -h/2.f, -1, 1, m);
 		glUseProgram(prog);
@@ -1344,12 +1131,9 @@ void mouse(int button, int state, int x, int y) {
 		crd_zoomby(&center,0.05);
 		if(lastzoom!=zoom){
 			lastzoom = zoom;
-			//print("=================================================       zoom:%d\n",lastzoom);
 			make_tiles();
 		}
-		//make_tiles();
 		updateQuads();
-		//glutPostRedisplay();
 	} else if (button == 4) {
 		int zoom = (int)floor(center.zoom+0.5);
 		crd_zoomby(&center,-0.05);
@@ -1358,9 +1142,7 @@ void mouse(int button, int state, int x, int y) {
 			//fprintf(stderr,"zoom:%d\n",lastzoom);
 			make_tiles();
 		}
-		//make_tiles();
 		updateQuads();
-		//glutPostRedisplay();
 	}
 }
 
@@ -1374,8 +1156,6 @@ void mousemove(int x,int y) {
 	center.row += oy/256.0;
 	make_tiles();
 	updateQuads();
-
-	//glutPostRedisplay();
 }
 
 int tile_make_tex(Tile* t){
@@ -1422,21 +1202,6 @@ void Render(float f){
 	for (i=0; i<tiles_draw_count; ++i) {
 		Tile* t = tiles_draw[i];
 
-		/*double scale = pow(2.0, center.zoom - t->z);
-		double ts = 256.0 * scale;
-		crd_t coord = center;
-		crd_zoomto(&coord,t->z);
-
-		tx = (t->x - coord.column) * ts;
-		ty = (t->y - coord.row) * ts;
-
-		glBindTexture(GL_TEXTURE_2D, t->tex);
-		glBegin(GL_TRIANGLE_STRIP);
-		glVertex2d(tx, ty); glTexCoord2f(0, 1);
-		glVertex2d(tx, ty+ts); glTexCoord2f(1, 0);
-		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
-		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
-		glEnd();*/
 		if (t->tex){
 			glBindTexture(GL_TEXTURE_2D,t->tex);
 			ltex = t->tex;
@@ -1469,9 +1234,10 @@ int num_cores(){
 int main(int argc, char* argv[]) {
 	int i;
 //	thrd_t thrd1,thrd2,thrd3,thrd4;
+	//FILE* stream;
 	time_t tm;
 	srand((unsigned int)time(&tm));
-		
+
 	glutInitWindowSize(veiwport[0], veiwport[1]);
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE);
@@ -1510,14 +1276,13 @@ int main(int argc, char* argv[]) {
 	tiles = make_queue();
 	tiles_load = make_queue();
 	tiles_loaded = make_queue();
-	i = num_cores();
+	i = 8;//num_cores();
 	while(i--) _beginthread(worker_load, 0, 0);
 	
 	make_tiles();
 	
 #endif
 
-	//glutMainLoop();
 	for (;;){
 		glutMainLoopEvent();
 
