@@ -778,7 +778,6 @@ void mousemove(int x,int y) {
 }
 
 void idle(void) {
-	//struct timespec s;
 	if (tiles_loaded_count>0) {
 		Tile* tile = tiles_loaded[--tiles_loaded_count];
 		GLuint textureId;
@@ -787,22 +786,20 @@ void idle(void) {
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, tile->texdata);
 		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		//printf("free texdata: %p\n",tile->texdata);
 		free(tile->texdata);//FIXME: corrupted double-linked list
 		tile->tex = textureId;
 		glutPostRedisplay();
 		return;
 	}
-	//s.tv_nsec = 50;
-	//thrd_sleep(&s,0);
-	Sleep(50);
 }
-
-/*double log2(double Value) {
+#if _MSC_VER < 1900
+double log2(double Value) {
 	return log(Value) * (1.4426950408889634073599246810019);
-}*/
+}
+#endif
 
 void do_exit(void){
 	//destroy_synclist(tiles_get);
