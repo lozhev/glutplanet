@@ -421,16 +421,25 @@ void tile_delete(Queue* q, Tile* tile) {
 }
 
 void tile_tofirst(Queue* q, Tile* tile) {
-	Node* cur = q->first;
+	Node* cur;// = q->first;
 	int has=0;
+	mtx_lock(&q->mtx);
+	if(q->count < 1) {
+		mtx_unlock(&q->mtx);
+		return;
+	}
 	//mtx_lock(&q->mtx);
+	cur = q->first;
 	while (cur) {
 		Tile* t = (Tile*)cur->data;
 		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) { has=1; break; }
 		cur = cur->next;
 	}
-	if(!has || q->first == cur) return;
-	mtx_lock(&q->mtx);
+	if(!has || q->first == cur) {
+		mtx_unlock(&q->mtx);
+		return;
+	}
+	//mtx_lock(&q->mtx);
 	cur->prev->next = cur->next;
 	if(cur->next)
 		cur->next->prev = cur->prev;
@@ -724,8 +733,7 @@ void to_draw(int z, int x, int y) {
 			//fprintf(stderr,"pop tiles count: %ld\n",tiles->count);
 		}
 	} else {
-		if (ret->del) print("make deleted %p\n",ret);
-		tile_tofirst(tiles_load,ret);
+		//tile_tofirst(tiles_load,ret);
 		tiles_draw[tiles_draw_count++] = ret;
 	}
 }
@@ -1119,7 +1127,7 @@ int tile_make(Tile* t){
 			if(p && p->tex) found = 1;
 			tz *= 0.5f;
 			n *= 2;
-			if(p)tile_tofirst(tiles_load,p);
+			//if(p)tile_tofirst(tiles_load,p);
 		};
 		if (p==0) return 0;
 		t->ptex = p->tex;
@@ -1221,7 +1229,7 @@ int tile_make_tex(Tile* t){
 	float* vtx = t->vtx;
 	glGenTextures(1, &textureId);
 	glBindTexture(GL_TEXTURE_2D, textureId);
-	glTexImage2D(GL_TEXTURE_2D, 0, 3, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1229,6 +1237,8 @@ int tile_make_tex(Tile* t){
 	free(t->texdata);
 	t->texdata = 0;
 	t->tex = textureId;
+	//if(t->del == 1)print("can del\n");
+	//if(t->del == 2)print("can del 2\n");
 	vtx[2] = 0; vtx[3] = 0;
 	vtx[6] = 0; vtx[7] = 1;
 	vtx[10]= 1; vtx[11]= 0;
@@ -1239,28 +1249,53 @@ int tile_make_tex(Tile* t){
 void worker_load(void* param){
 	while(1){
 		Tile* t = queue_pop_wait(tiles_load);
-		if(!t->del){
+		if(t->del==0){
 			t->texdata = getImageData(t);
-			if (t->del!=1 && t->texdata){
+			if (t->del==0 && t->texdata){
 				queue_push(tiles_loaded,t);
 			} else {
-				print("delete after load %p\n",t);
+				//print("delete after load %p\n",t);
 				free(t->texdata);
-				queue_push(tiles_delete,t);
+				free(t);
+				//queue_push(tiles_delete,t);
 			}
 		} else {
-			print("delete %p\n",t);
-			queue_push(tiles_delete,t);
+			//print("delete %p\n",t);
+			free(t);
+			//queue_push(tiles_delete,t);
 		}
+		//t->del = 2;
 	}
 }
-
+int ltwo = -1;
 void Render(float f){
-	int i=0,ch=0;
+	int i = 0, ch = 0, one = 0, two = 0;;
 	GLuint ltex=-1;
+	Tile* t;
+	Node* n = tiles_delete->first;
 
-	Tile* t = queue_pop(tiles_delete);
-	/*while (t /*&& i<4* /){
+	if(n) {
+		t = (Tile*)n->data;
+		if(t->del == 1) {
+			one++;
+			glDeleteTextures(1, &t->tex);
+			tiles_delete->first = n->next;
+			free(n);
+			tiles_delete->count--;
+			if(tiles_delete->count == 0) tiles_delete->last = 0;
+			//print("deleted from tiles_delete count: %d\n", tiles_delete->count);
+		}
+		if(t->del == 2)two++;
+		//n = n->next;
+	}
+	//if(one) print("--------------- ONE --------------- %d\n",one);
+	if(ltwo != two) {
+		//print("--------------- TWO --------------- %d\n", two);
+		ltwo = two;
+	}
+
+	/*Tile* t = queue_pop(tiles_delete);
+	while (t /*&& i<4* /){
 		if (t->tex)
 			glDeleteTextures(1,&t->tex);
 		free(t);
@@ -1271,13 +1306,13 @@ void Render(float f){
 
 	i=0;
 	t = queue_pop(tiles_loaded);
-	while (t /*&& i<4*/){
+	while (t && i<10){
 		tile_make_tex(t);
 		t = queue_pop(tiles_loaded);
 		ch=1;
 		i++;
 	}
-	if (i) print("loaded %d\n",i);
+	//if (i) print("loaded %d\n",i);
 	if (ch){
 		make_tiles();
 		updateQuads();
