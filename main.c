@@ -39,6 +39,7 @@ typedef struct Tile {
 	stbi_uc* texdata; // image
 	float vtx[16];    // vertices
 	int del;          // delete texture
+	volatile int ref;
 } Tile;
 
 void tile_init(Tile* t,int x,int y,int z){
@@ -49,6 +50,21 @@ void tile_init(Tile* t,int x,int y,int z){
 	t->ptex = 0;
 	t->texdata = 0;
 	t->del = 0;
+	t->ref = 1;
+}
+
+int tile_release(Tile* t){
+	--t->ref;
+	if (t->ref==0){
+		free(t->texdata);
+		t->texdata=0;
+		if(t->tex){
+			glDeleteTextures(1,&t->tex);
+		}
+		free(t);
+		return 1;
+	}
+	return 0;
 }
 
 int cmp_tile(const void* l, const void* r) {
@@ -281,6 +297,19 @@ Queue* make_queue(){
 void queue_push(Queue* q,void* data){
 	Node* n = (Node*)malloc(sizeof(Node));
 	n->data = data;
+	if (q->last){
+		q->last->next = n;
+	} else {
+		q->first = n;
+	}
+	n->next = 0;
+	q->last = n;
+	++q->count;
+}
+
+void queue_push_s(Queue* q,void* data){
+	Node* n = (Node*)malloc(sizeof(Node));
+	n->data = data;
 	mtx_lock(&q->mtx);
 	if (q->last){
 		q->last->next = n;
@@ -295,6 +324,18 @@ void queue_push(Queue* q,void* data){
 }
 
 void* queue_pop(Queue* q){
+	if (q->count){
+		Node* n = q->first;
+		void* ret = n->data;
+		q->first = n->next;
+		if (--q->count==0) q->last=0;
+		free(n);
+		return ret;
+	}
+	return 0;
+}
+
+void* queue_pop_s(Queue* q){
 	mtx_lock(&q->mtx);
 	if (q->count){
 		Node* n = q->first;
@@ -329,6 +370,22 @@ void deque_push_back(Queue* q,void* data){
 }
 
 void deque_push_front(Queue* q,void* data){
+	Node* n = (Node*)malloc(sizeof(Node));
+	n->data = data;
+	if (q->count){
+		q->first->prev = n;
+		n->next = q->first;
+		q->first = n;
+	} else {
+		q->first = n;
+		n->next = 0;
+		q->last = n;
+	}
+	n->prev = 0;
+	++q->count;
+}
+
+void deque_push_front_s(Queue* q,void* data){
 	Node* n = (Node*)malloc(sizeof(Node));
 	n->data = data;
 	mtx_lock(&q->mtx);
@@ -412,6 +469,7 @@ void tile_delete(Queue* q, Tile* tile) {
 	} else {
 		cur->prev->next = cur->next;
 	}
+	free(cur);
 	--q->count;
 	//mtx_unlock(&q->mtx);
 	print("tiles_load %d\n",q->count);
@@ -421,6 +479,33 @@ void tile_delete(Queue* q, Tile* tile) {
 }
 
 void tile_tofirst(Queue* q, Tile* tile) {
+	Node* cur;// = q->first;
+	int has=0;
+	if(q->count < 1) return;
+	
+	cur = q->first;
+	while (cur) {
+		Tile* t = (Tile*)cur->data;
+		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) { has=1; break; }
+		cur = cur->next;
+	}
+	if(!has || q->first == cur) return;
+
+	cur->prev->next = cur->next;
+	if(cur->next)
+		cur->next->prev = cur->prev;
+	else
+		q->last = cur->prev;
+
+	q->first->prev = cur;
+
+	cur->next = q->first;
+	cur->prev = 0;
+	q->first = cur;
+	return;
+}
+
+void tile_tofirst_s(Queue* q, Tile* tile) {
 	Node* cur;// = q->first;
 	int has=0;
 	mtx_lock(&q->mtx);
@@ -714,27 +799,56 @@ void to_draw(int z, int x, int y) {
 	Tile* ret = tile_find(tiles, &tile);
 	//print_tile(&tile);
 	if(ret == 0) {
-		//int m;
+		Tile r,*p;
+	
 		Tile* newtile = (Tile*)malloc(sizeof(Tile));
 		tile_init(newtile, tile.x, tile.y, tile.z);
 		tile_make(newtile);
 
+		newtile->ref+=1;
 		deque_push_front(tiles, newtile);
-		deque_push_front(tiles_load, newtile);
+		//deque_push_front_s(tiles_load, newtile);
 		//fprintf(stderr,"push tiles count: %ld\n",tiles->count);
 		tiles_draw[tiles_draw_count++] = newtile;
 
-		if(tiles->count > 256) {
+		if(tiles->count > 512) {// 4*6*18=432. 512 tiles ~100mb texures
 			Tile* t = deque_pop_back(tiles);
-			t->del = 1;
-			queue_push(tiles_delete,t);
-			//tile_delete(tiles_load,t);
-			//pop_tile(tiles);// TODO: remove tile in tiles_get
-			//fprintf(stderr,"pop tiles count: %ld\n",tiles->count);
+			tile_release(t);
 		}
+
+		/*tile_parent(newtile, &r);
+		p = tile_find(tiles,&r);
+		while(p==0 && r.z>1){
+			tile_parent(&r, &r);
+			p = tile_find(tiles,&r);
+		}
+
+		if(p == 0){
+			Tile* parent = (Tile*)malloc(sizeof(Tile));
+			tile_init(parent, r.x, r.y, r.z);
+			tile_make(parent);
+			parent->ref+=2;
+			//deque_push_front(tiles, parent);
+			//deque_push_front_s(tiles_load, parent);
+			tile_release(parent);
+		}*/
+		tile_release(newtile);
 	} else {
-		//tile_tofirst(tiles_load,ret);
+		//Tile r,*p;
+		//tile_tofirst_s(tiles_load,ret);
+		tile_tofirst(tiles,ret); // FIXME:!! second search
 		tiles_draw[tiles_draw_count++] = ret;
+
+		/*tile_parent(ret, &r);
+		p = tile_find(tiles,&r);
+		while(p==0 && r.z>1){
+			tile_parent(&r, &r);
+			p = tile_find(tiles,&r);
+		}
+		if(p && !p->tex){
+			print("r.z %d\n",r.z);
+			tile_tofirst_s(tiles_load,p);
+		}*/
 	}
 }
 
@@ -826,6 +940,12 @@ void make_tiles() {
 		int sx = minCol;
 		int sy = minRow;
 		int n = (nx-sx+1)*(ny-sy+1);
+		int sn = n;
+		//
+		Tile t[512],p;
+		int t_count=0;
+		Node* node;
+		//
 		while(n) {
 			for(j = sy; j <= ny; ++j) {
 				to_draw(baseZoom, nx, j); --n;
@@ -844,6 +964,29 @@ void make_tiles() {
 			} if(!n) break;
 			sy++;
 		}
+
+		//n = (nx-sx+1)*(ny-sy+1);
+		node = tiles->first;
+		for (;sn;--sn){
+			Tile* c = (Tile*)node->data;
+			tile_parent(c,&p);
+			while(p.z>0){
+			int has = 0;
+			c = tile_find(tiles,&p);
+			if (c==0){
+			for(j=0;j<t_count;++j){
+				Tile* tt = &t[j];
+				if (tt->z==p.z&&tt->x==p.x&&tt->y==p.y) { has=1; break; }
+			}
+			if(!has)
+				t[t_count++]=p;
+			}
+			tile_parent(&p,&p);
+			}
+			node = node->next;
+		}
+		qsort(t,t_count,sizeof(Tile),cmp_tile);
+		print("ok\n");
 	}
 }
 
@@ -875,6 +1018,7 @@ void do_exit(void){
 	//destroyMap(&map);
 }
 
+#pragma region begin
 //#define TEST_QUEUE 1
 #if TEST_QUEUE
 typedef struct {
@@ -1031,6 +1175,7 @@ void Render(float f){
 	glutSwapBuffers();
 }
 #endif
+#pragma endregion
 
 const char vert_src[]=
 "attribute vec4 a_pos;"
@@ -1127,9 +1272,16 @@ int tile_make(Tile* t){
 			if(p && p->tex) found = 1;
 			tz *= 0.5f;
 			n *= 2;
-			//if(p)tile_tofirst(tiles_load,p);
+			/*if(p && !p->tex) {
+				//p->ref += 1;
+				tile_tofirst_s(tiles_load,p);
+			}*/
 		};
 		if (p==0) return 0;
+		/*if(p && !p->tex) {
+			//p->ref += 1;
+			tile_tofirst_s(tiles_load,p);
+		}*/
 		t->ptex = p->tex;
 		tx = xoff * tz;
 		ty = yoff * tz;
@@ -1229,7 +1381,7 @@ int tile_make_tex(Tile* t){
 	float* vtx = t->vtx;
 	glGenTextures(1, &textureId);
 	glBindTexture(GL_TEXTURE_2D, textureId);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGB, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+	glTexImage2D(GL_TEXTURE_2D, 0, 3/*GL_COMPRESSED_RGB*/, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1245,79 +1397,44 @@ int tile_make_tex(Tile* t){
 	vtx[14]= 1; vtx[15]= 1;
 	return 1;
 }
-
+int change=0;
 void worker_load(void* param){
+	mtx_t mtx;
+	void* data;
+	mtx_init(&mtx,1);
 	while(1){
 		Tile* t = queue_pop_wait(tiles_load);
-		if(t->del==0){
-			t->texdata = getImageData(t);
-			if (t->del==0 && t->texdata){
-				queue_push(tiles_loaded,t);
+		if (!tile_release(t)){
+			t->ref += 1;
+			data = getImageData(t);
+			
+			if (tile_release(t)){
+				print("release after load\n");
+				free(data);
 			} else {
-				//print("delete after load %p\n",t);
-				free(t->texdata);
-				free(t);
-				//queue_push(tiles_delete,t);
+				//mtx_lock(&mtx);
+				t->ref += 1;
+				queue_push_s(tiles_loaded,t);
+				t->texdata = data;
+				change = 1;
+				//mtx_unlock(&mtx);
 			}
-		} else {
-			//print("delete %p\n",t);
-			free(t);
-			//queue_push(tiles_delete,t);
+			//if (t->texdata) queue_push_s(tiles_loaded,t);
+		} else{
+			print("thread release\n");
 		}
-		//t->del = 2;
 	}
 }
 int ltwo = -1;
 void Render(float f){
-	int i = 0, ch = 0, one = 0, two = 0;;
+	int i;
 	GLuint ltex=-1;
-	Tile* t;
-	Node* n = tiles_delete->first;
-
-	if(n) {
-		t = (Tile*)n->data;
-		if(t->del == 1) {
-			one++;
-			glDeleteTextures(1, &t->tex);
-			tiles_delete->first = n->next;
-			free(n);
-			tiles_delete->count--;
-			if(tiles_delete->count == 0) tiles_delete->last = 0;
-			//print("deleted from tiles_delete count: %d\n", tiles_delete->count);
-		}
-		if(t->del == 2)two++;
-		//n = n->next;
-	}
-	//if(one) print("--------------- ONE --------------- %d\n",one);
-	if(ltwo != two) {
-		//print("--------------- TWO --------------- %d\n", two);
-		ltwo = two;
-	}
-
-	/*Tile* t = queue_pop(tiles_delete);
-	while (t /*&& i<4* /){
-		if (t->tex)
-			glDeleteTextures(1,&t->tex);
-		free(t);
-		t = queue_pop(tiles_delete);
-		i++;
-	}
-	if (i) print("deleted %d\n",i);*/
-
-	i=0;
-	t = queue_pop(tiles_loaded);
-	while (t && i<10){
+	Tile *t = queue_pop(tiles_loaded);
+	while(t){
 		tile_make_tex(t);
+		if(tile_release(t)) print("render release\n");
 		t = queue_pop(tiles_loaded);
-		ch=1;
-		i++;
 	}
-	//if (i) print("loaded %d\n",i);
-	if (ch){
-		make_tiles();
-		updateQuads();
-	}
-
 
 	glClear(GL_COLOR_BUFFER_BIT);
 
@@ -1326,6 +1443,9 @@ void Render(float f){
 	glEnableVertexAttribArray(0);
 	for (i=0; i<tiles_draw_count; ++i) {
 		Tile* t = tiles_draw[i];
+		if(t->texdata){
+			tile_make_tex(t);
+		}
 
 		if (t->tex){
 			glBindTexture(GL_TEXTURE_2D,t->tex);
@@ -1339,6 +1459,12 @@ void Render(float f){
 
 		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+	}
+
+	if (change){
+		make_tiles();
+		updateQuads();
+		change=0;
 	}
 }
 
@@ -1394,13 +1520,13 @@ int main(int argc, char* argv[]) {
 	prog = creatProg(vert_src,frag_src);
 	u_proj = glGetUniformLocation(prog, "u_proj");
 	crd_setz(&center,0.5,0.5,0);
-	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
+	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 16.0));
 	lastzoom = (int)floor(center.zoom+0.5);
 
 	tiles = make_queue();
 	tiles_load = make_queue();
 	tiles_loaded = make_queue();
-	tiles_delete = make_queue();
+	//tiles_delete = make_queue();
 	i = 8;// num_cores();
 	while(i--) _beginthread(worker_load, 0, 0);
 	
