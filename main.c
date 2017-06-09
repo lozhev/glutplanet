@@ -20,18 +20,30 @@
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
+void print(const char* format, ...);
+
 #if _WIN32
+#define StartThread(start) CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) start, 0, 0, NULL)
 typedef CRITICAL_SECTION mtx_t;
 #define mtx_init(m) InitializeCriticalSection(m)
 #define mtx_destroy(m) DeleteCriticalSection(m)
 #define mtx_lock(m) EnterCriticalSection(m)
 #define mtx_unlock(m) LeaveCriticalSection(m)
+#if !defined(_WIN32_WINNT) || !defined(_WIN32_WINNT_VISTA) || (_WIN32_WINNT < _WIN32_WINNT_VISTA)
+typedef HANDLE cnd_t;
+#define cnd_init(c) *c = CreateEvent(NULL, FALSE, FALSE, NULL); 
+#define cnd_destroy(c) CloseHandle(*c)
+#define cnd_signal(c) SetEvent(*c)
+#define cnd_wait(c,m) mtx_unlock(m); WaitForSingleObject(*c,INFINITE); mtx_lock(m)
+#else
 typedef CONDITION_VARIABLE cnd_t;
 #define cnd_init(c) InitializeConditionVariable(c)
 #define cnd_destroy(c)
 #define cnd_signal(c) WakeConditionVariable(c)
 #define cnd_wait(c,m) SleepConditionVariableCS(c,m,INFINITE)
+#endif
 #elif __linux
+#define StartThread(start) pthread_create(0, 0, start, 0)
 typedef pthread_mutex_t mtx_t;
 #define mtx_init(m) pthread_mutex_init(m, 0)
 #define mtx_destroy(m) pthread_mutex_destroy(m)
@@ -80,10 +92,14 @@ void tile_init(Tile* t,int x,int y,int z){
 int tile_release(Tile* t){
 	--t->ref;
 	if (t->ref==0){
-		free(t->texdata);
-		t->texdata=0;
+		if (t->texdata) {
+			free(t->texdata);
+			t->texdata=0;
+			print("release texdata\n");
+		}
 		if(t->tex){
 			glDeleteTextures(1,&t->tex);
+			t->tex = 0;
 		}
 		free(t);
 		return 1;
@@ -143,8 +159,8 @@ int _maxi(int a,int b) {
 
 // Coordinate
 typedef struct {
-	double row;
-	double column;
+	union { double row; double x; };
+	union { double column; double y; };
 	double zoom;
 } crd_t;
 
@@ -466,6 +482,7 @@ void* queue_pop_wait(Queue* q) {
 	return ret;
 }
 
+// most hot function..
 Tile* tile_find(const Queue* q, Tile* tile) {
 	const Node* cur = q->first;
 	while (cur) {
@@ -1007,10 +1024,10 @@ double gety(double lat,double zoom){
 	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) /2 * pow(2, zoom);
 }
 
-double getxp(double lon,double pzoom){
-	return ((lon + 180) / 360) * pzoom;
+double getyp(double lon,double pzoom){
+	return ((lon + 180.0) / 360.0) * pzoom;
 }
-double getyp(double lat,double pzoom){
+double getxp(double lat,double pzoom){
 	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) /2 * pzoom;
 }
 
@@ -1395,7 +1412,6 @@ int tile_make_tex(Tile* t){
 	vtx[14]= 1; vtx[15]= 1;
 	return 1;
 }
-int change=0;
 void worker_load(void* param){
 	mtx_t mtx;
 	void* data;
@@ -1406,7 +1422,6 @@ void worker_load(void* param){
 			t->ref += 1;
 			data = getImageData(t);
 			
-			//mtx_lock(&mtx);
 			if (tile_release(t)){
 				print("release after load\n");
 				free(data);
@@ -1415,18 +1430,13 @@ void worker_load(void* param){
 				t->ref += 1;
 				t->texdata = data;
 				queue_push(tiles_loaded, t);
-				//change = 1;
 				mtx_unlock(&mtx);
-				//queue_push_s(tiles_loaded, t);
 			}
-			//mtx_unlock(&mtx);
-		}/* else{
-			print("thread release\n");
-		}*/
+		}
 	}
 	mtx_destroy(&mtx);
 }
-
+int change=0;
 void Render(float f){
 	int i=0;
 	GLuint ltex=-1;
@@ -1434,7 +1444,7 @@ void Render(float f){
 	while(t) {
 		tile_make_tex(t);
 		tile_release(t);
-		if(i++ == 2) break;
+		if(i++ == 1) break;
 		t = queue_pop(tiles_loaded);
 		change = 1;
 	}
@@ -1471,6 +1481,156 @@ void Render(float f){
 
 void Draw_empty(void){}
 
+/*double p[][2]={
+	{-165.0,60.0},
+	{-165.0+5.0,60.0},
+	{-165.0+5.0,60.0-5.0},
+	{-165.0,60.0-5.0}
+};*/
+
+//55.3992609,-163.1431794
+double lon=-163.1441188,lat=55.3988969;
+crd_t fromPointToLatLng(crd_t point, int zoom);
+crd_t fromLatLngToPoint(double lat, double lon, int zoom);
+void keyboard(unsigned char key,int x,int y){
+	if(key == 32) {
+//		double z,rx,ry;
+		crd_t ret;
+		print("row: %.16f column: %.16f zoom: %.16f\n",center.row,center.column,center.zoom);
+		ret = fromLatLngToPoint(lat,lon,18);
+		ret = fromPointToLatLng(ret,18);
+		print("lat: %.8f lon: %.8f",ret.x,ret.y);
+	}
+}
+
+/*
+public final class GoogleMapsProjection2 
+{
+private final int TILE_SIZE = 256;
+private PointF _pixelOrigin;
+private double _pixelsPerLonDegree;
+private double _pixelsPerLonRadian;
+
+public GoogleMapsProjection2()
+{
+	this._pixelOrigin = new PointF(TILE_SIZE / 2.0,TILE_SIZE / 2.0);
+	this._pixelsPerLonDegree = TILE_SIZE / 360.0;
+	this._pixelsPerLonRadian = TILE_SIZE / (2 * Math.PI);
+}
+
+double bound(double val, double valMin, double valMax)
+{
+	double res;
+	res = Math.max(val, valMin);
+	res = Math.min(res, valMax);
+	return res;
+}
+
+double degreesToRadians(double deg) 
+{
+	return deg * (Math.PI / 180);
+}
+
+double radiansToDegrees(double rad) 
+{
+	return rad / (Math.PI / 180);
+}
+
+PointF fromLatLngToPoint(double lat, double lng, int zoom)
+{
+	PointF point = new PointF(0, 0);
+
+	point.x = _pixelOrigin.x + lng * _pixelsPerLonDegree;       
+
+	// Truncating to 0.9999 effectively limits latitude to 89.189. This is
+	// about a third of a tile past the edge of the world tile.
+	double siny = bound(Math.sin(degreesToRadians(lat)), -0.9999,0.9999);
+	point.y = _pixelOrigin.y + 0.5 * Math.log((1 + siny) / (1 - siny)) *- _pixelsPerLonRadian;
+
+	int numTiles = 1 << zoom;
+	point.x = point.x * numTiles;
+	point.y = point.y * numTiles;
+	return point;
+}
+
+PointF fromPointToLatLng(PointF point, int zoom)
+{
+	int numTiles = 1 << zoom;
+	point.x = point.x / numTiles;
+	point.y = point.y / numTiles;       
+
+	double lng = (point.x - _pixelOrigin.x) / _pixelsPerLonDegree;
+	double latRadians = (point.y - _pixelOrigin.y) / - _pixelsPerLonRadian;
+	double lat = radiansToDegrees(2 * Math.atan(Math.exp(latRadians)) - Math.PI / 2);
+	return new PointF(lat, lng);
+}
+
+public static void main(String []args) 
+{
+	GoogleMapsProjection2 gmap2 = new GoogleMapsProjection2();
+
+	PointF point1 = gmap2.fromLatLngToPoint(41.850033, -87.6500523, 15);
+	System.out.println(point1.x+"   "+point1.y);
+	PointF point2 = gmap2.fromPointToLatLng(point1,15);
+	System.out.println(point2.x+"   "+point2.y);
+}
+}
+*/
+#define TILE_SIZE 256
+double _pixelOrigin[2] = {128.0,128.0};
+double _pixelsPerLonDegree = TILE_SIZE / 360.0;
+double _pixelsPerLonRadian = TILE_SIZE / (2.0 * M_PI);
+
+double bound(double val, double valMin, double valMax){
+	double res;
+	res = _maxd(val, valMin);
+	res = _mind(res, valMax);
+	return res;
+}
+
+double degreesToRadians(double deg){
+	return deg * pi180;
+}
+
+double radiansToDegrees(double rad){
+	return rad / pi180;
+}
+
+crd_t fromLatLngToPoint(double lat, double lon, int zoom){
+	crd_t point;// = new PointF(0, 0);
+	double siny;
+	int numTiles;
+
+	point.x = _pixelOrigin[0] + lon * _pixelsPerLonDegree;       
+
+	// Truncating to 0.9999 effectively limits latitude to 89.189. This is
+	// about a third of a tile past the edge of the world tile.
+	siny = bound(sin(degreesToRadians(lat)), -0.9999,0.9999);
+	point.y = _pixelOrigin[1] + 0.5 * log((1.0 + siny) / (1.0 - siny)) * -_pixelsPerLonRadian;
+
+	numTiles = 1 << zoom;
+	point.x = point.x * numTiles;
+	point.y = point.y * numTiles;
+	point.zoom = zoom;
+	return point;
+}
+
+crd_t fromPointToLatLng(crd_t point, int zoom){
+	crd_t ret;
+	double lon,latRadians,lat;
+	int numTiles = 1 << zoom;
+	point.x = point.x / numTiles;
+	point.y = point.y / numTiles;       
+
+	lon = (point.x - _pixelOrigin[0]) / _pixelsPerLonDegree;
+	latRadians = (point.y - _pixelOrigin[1]) / - _pixelsPerLonRadian;
+	lat = radiansToDegrees(2 * atan(exp(latRadians)) - M_PI / 2);
+	ret.x = lon;
+	ret.y = lat;
+	ret.zoom = zoom;
+	return ret;
+}
+
 int num_cores(){
 #if _WIN32
 	SYSTEM_INFO sysinfo;
@@ -1485,7 +1645,7 @@ int num_cores(){
 
 int main(int argc, char* argv[]) {
 	int i;
-//	thrd_t thrd1,thrd2,thrd3,thrd4;
+	double z,startz;
 	time_t tm;
 	srand((unsigned int)time(&tm));
 
@@ -1495,7 +1655,7 @@ int main(int argc, char* argv[]) {
 	glutCreateWindow("glutplanet");
 	glutMouseFunc(mouse);
 	glutMotionFunc(mousemove);
-	//glutIdleFunc(idle);
+	glutKeyboardFunc(keyboard);
 	glutReshapeFunc(reshape);
 	glutDisplayFunc(Draw_empty/*draw*/);
 
@@ -1520,23 +1680,38 @@ int main(int argc, char* argv[]) {
 	gladLoadGL();
 	prog = creatProg(vert_src,frag_src);
 	u_proj = glGetUniformLocation(prog, "u_proj");
-	crd_setz(&center,0.5,0.5,0);
+	crd_setz(&center,0.4,0.6,0);
 	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
 	lastzoom = (int)floor(center.zoom+0.5);
+	startz = center.zoom;
 
 	tiles = make_queue();
 	tiles_load = make_queue();
 	tiles_loaded = make_queue();
-	//tiles_delete = make_queue();
+
 	i = 8;// num_cores();
-	while(i--) _beginthread(worker_load, 0, 0);
+	while(i--) StartThread(worker_load);
 	
 	make_tiles();
-	
 #endif
 
+	z = startz;
 	for (;;){
 		glutMainLoopEvent();
+
+		if (z<18) {
+			double zz,rx,ry;
+			z+=0.04;
+			center.zoom = z;
+			//crd_zoomto(&center,z);
+			//crd_zoomby(&center,0.04);
+			zz = pow(2,center.zoom);
+			rx = getxp(lat,zz);
+			ry = getyp(lon,zz);
+			crd_set(&center,rx,ry);
+			make_tiles();
+			updateQuads();
+		}
 
 		Render(0);
 		glutSwapBuffers();
