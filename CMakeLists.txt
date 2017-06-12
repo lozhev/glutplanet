@@ -12,6 +12,7 @@ link_libraries (
 	glut
 	curl
 	pthread
+	dl
 )
 
-add_executable(glutplanet main.c tinycthread.c)
+add_executable(glutplanet main.c glad.c)

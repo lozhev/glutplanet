@@ -1,5 +1,6 @@
 #include "glad/glad.h"
-#include <GL/glut.h>
+#include <GL/freeglut_std.h>
+#include <GL/freeglut_ext.h> // glutMainLoopEvent
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdio.h>
@@ -20,10 +21,9 @@
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
-void print(const char* format, ...);
 
 #if _WIN32
-#define StartThread(start) CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) start, 0, 0, NULL)
+#define StartThread(start) CreateThread(NULL, 0, start, 0, 0, NULL)
 typedef CRITICAL_SECTION mtx_t;
 #define mtx_init(m) InitializeCriticalSection(m)
 #define mtx_destroy(m) DeleteCriticalSection(m)
@@ -42,8 +42,25 @@ typedef CONDITION_VARIABLE cnd_t;
 #define cnd_signal(c) WakeConditionVariable(c)
 #define cnd_wait(c,m) SleepConditionVariableCS(c,m,INFINITE)
 #endif
+void print(const char* format, ...) {
+	char buf[256];
+	va_list argptr;
+	va_start(argptr, format);
+	vsprintf(buf, format, argptr);
+	va_end(argptr);
+	OutputDebugStringA(buf);
+}
 #elif __linux
-#define StartThread(start) pthread_create(0, 0, start, 0)
+//#include <sched.h>
+//#define __USE_GNU
+#include <pthread.h>
+//#include <bits/confname.h>
+#include <unistd.h>
+#define StartThread(start,arg) {\
+pthread_t th;\
+pthread_create(&th, 0, start, (void*)arg);\
+pthread_setschedparam(th, 1, &param);\
+}
 typedef pthread_mutex_t mtx_t;
 #define mtx_init(m) pthread_mutex_init(m, 0)
 #define mtx_destroy(m) pthread_mutex_destroy(m)
@@ -53,17 +70,14 @@ typedef pthread_cond_t cnd_t;
 #define cnd_init(c) pthread_cond_init(c, 0)
 #define cnd_destroy(c) pthread_cond_destroy(c)
 #define cnd_signal(c) pthread_cond_signal(c)
-#define cnd_wait(c) pthread_cond_wait(c)
-#endif
-
+#define cnd_wait(c,m) pthread_cond_wait(c,m)
 void print(const char* format, ...) {
-	char buf[256];
 	va_list argptr;
 	va_start(argptr, format);
-	vsprintf(buf, format, argptr);
+	vfprintf(stderr, format, argptr);
 	va_end(argptr);
-	OutputDebugStringA(buf);
 }
+#endif
 
 // Tile
 typedef struct Tile {
@@ -89,13 +103,13 @@ void tile_init(Tile* t,int x,int y,int z){
 	t->ref = 1;
 }
 
-int tile_release(Tile* t){
+/*int tile_release(Tile* t){
 	--t->ref;
 	if (t->ref==0){
 		if (t->texdata) {
 			free(t->texdata);
 			t->texdata=0;
-			print("release texdata\n");
+			//print("release texdata\n");
 		}
 		if(t->tex){
 			glDeleteTextures(1,&t->tex);
@@ -105,7 +119,7 @@ int tile_release(Tile* t){
 		return 1;
 	}
 	return 0;
-}
+}*/
 
 int cmp_tile(const void* l, const void* r) {
 	const Tile* lsh = (const Tile*)l;
@@ -141,8 +155,8 @@ int tile_make(Tile* t);
 int tile_make_tex(Tile* t);
 
 
-#define _mini(a,b) (a<b?a:b)
-#define _maxi(a,b) (a>b?a:b)
+#define mini(a,b) (a<b?a:b)
+#define maxi(a,b) (a>b?a:b)
 
 double _mind(double a,double b) {
 	return a<b?a:b;
@@ -150,12 +164,10 @@ double _mind(double a,double b) {
 double _maxd(double a,double b) {
 	return a>b?a:b;
 }
-/*int _mini(int a,int b) {
-	return a<b?a:b;
-}
-int _maxi(int a,int b) {
-	return a>b?a:b;
-}*/
+
+#define mind(a,b) (a<b?a:b)
+#define maxd(a,b) (a>b?a:b)
+
 
 // Coordinate
 typedef struct {
@@ -317,7 +329,7 @@ typedef struct Node{
 }Node;
 
 typedef struct{
-	Node* first,*last;
+	Node* first, *last;
 
 	mtx_t mtx;
 	cnd_t cnd;
@@ -435,8 +447,8 @@ void deque_push_front_s(Queue* q,void* data){
 		q->first = n;
 	} else {
 		q->first = n;
-		n->next = 0;
 		q->last = n;
+		n->next = 0;
 	}
 	n->prev = 0;
 	++q->count;
@@ -463,6 +475,23 @@ void* deque_pop_back(Queue* q){
 	return ret;
 }
 
+void* deque_pop_back_s(Queue* q) {
+	mtx_lock(&q->mtx);
+	if(q->last) {
+		Node* n = q->last;
+		void* ret = n->data;
+		q->last = n->prev;
+		if(--q->count == 0) q->first = 0;
+		else q->last->next = 0;
+		//print("q: %d\n",q->count);
+		mtx_unlock(&q->mtx);
+		free(n);
+		return ret;
+	}
+	mtx_unlock(&q->mtx);
+	return 0;
+}
+
 void* queue_pop_wait(Queue* q) {
 	Node* n;
 	void* ret = 0;
@@ -482,6 +511,46 @@ void* queue_pop_wait(Queue* q) {
 	return ret;
 }
 
+typedef struct {
+	void** data;
+	void* end;
+	int count;
+	int cap;
+}Array;
+
+Array* make_array(int count) {
+	Array* a = (Array*)malloc(sizeof(Array));
+	a->data = malloc(count * sizeof(void*));
+	a->count = 0;
+	a->cap = count;
+	return a;
+}
+mtx_t g_mtx;
+void array_push(Array* a, void* data) {
+	if(a->count == a->cap) {
+		int i;
+		void** data;
+		a->cap += 20;
+		print("realloc: %3d %p count: %d\n", a->cap, a, a->count);
+		//mtx_lock(&g_mtx);
+		//a->data = realloc(a->data, a->cap * sizeof(void*));
+		data = malloc(a->cap * sizeof(void*));
+		//mtx_unlock(&g_mtx);
+		for(i = 0; i < a->count; ++i) {
+			data[i] = a->data[i];
+			//print("%d %p\n", i, t);// print_tile(t);
+		}
+		free(a->data);
+		a->data = data;
+	}
+	a->data[a->count++] = data;
+}
+
+void* array_pop(Array* a) {
+	if (a->count) return a->data[--a->count];
+	return 0;
+}
+
 // most hot function..
 Tile* tile_find(const Queue* q, Tile* tile) {
 	const Node* cur = q->first;
@@ -493,7 +562,7 @@ Tile* tile_find(const Queue* q, Tile* tile) {
 	return 0;
 }
 
-void tile_delete(Queue* q, Tile* tile) {
+/*void tile_delete(Queue* q, Tile* tile) {
 	Node* cur = q->first;
 	while (cur) {
 		Tile* t = (Tile*)cur->data;
@@ -517,7 +586,7 @@ void tile_delete(Queue* q, Tile* tile) {
 	//print_tile((Tile*)cur->data);
 
 	return;
-}
+}*/
 
 void tile_tofirst(Queue* q, Tile* tile) {
 	Node* cur;// = q->first;
@@ -628,10 +697,10 @@ int exists(const char* name) {
 typedef void(*MakeUrl)(void*,Tile*,char*);
 
 typedef struct MapProvider {
-	char* name;
-	char* subdomians[4];
-	char* urlformat;
-	char* imgformat;
+	char name[16];
+	char subdomians[4][4];
+	char urlformat[128];
+	char imgformat[5];
 	MakeUrl makeurl;
 } MapProvider;
 
@@ -641,21 +710,35 @@ int veiwport[2]= {800,600};
 
 Queue* tiles;
 Queue* tiles_load;
-Queue* tiles_loaded;
-Queue* tiles_delete;
+//Queue* tiles_loaded;
+Array* tiles_loaded;
+//Queue* tiles_release;
+Array* tiles_release;
 Tile* tiles_draw[64];
 int tiles_draw_count = 0;
+
+int tile_release(Tile* t) {
+	--t->ref;
+	if(t->ref == 0) {
+		array_push(tiles_release, t);
+		/*if(t->texdata) {
+			free(t->texdata);
+			t->texdata = 0;
+			//print("release texdata\n");
+		}
+		if(t->tex) {
+			glDeleteTextures(1, &t->tex);
+			t->tex = 0;
+		}
+		free(t);*/
+		return 1;
+	}
+	return 0;
+}
 
 MapProvider map;
 
 void initMqcdnMap(MapProvider* map) {
-	map->name = (char*)malloc(16);
-	map->subdomians[0] = (char*)malloc(4);
-	map->subdomians[1] = (char*)malloc(4);
-	map->subdomians[2] = (char*)malloc(4);
-	map->subdomians[3] = (char*)malloc(4);
-	map->urlformat = (char*)malloc(128);
-	map->imgformat = (char*)malloc(5);
 	map->makeurl=0;
 
 	sprintf(map->name,"mqcdn");
@@ -668,13 +751,6 @@ void initMqcdnMap(MapProvider* map) {
 }
 
 void initOSMMap(MapProvider* map) {
-	map->name = (char*)malloc(16);
-	map->subdomians[0] = (char*)malloc(4);
-	map->subdomians[1] = (char*)malloc(4);
-	map->subdomians[2] = (char*)malloc(4);
-	map->subdomians[3] = (char*)malloc(4);
-	map->urlformat = (char*)malloc(128);
-	map->imgformat = (char*)malloc(4);
 	map->makeurl=0;
 
 	sprintf(map->name,"osm");
@@ -697,20 +773,13 @@ void getBindUrl(void* m,Tile* tile, char* url){
 		int mask = 1 << (i - 1);
 		if (((int)tile->x & mask) != 0) ++digit;
 		if (((int)tile->y & mask) != 0) digit+=2;
-		sprintf(d,"%d",digit);
+		sprintf(d, "%d", digit); //itoa(digit, d, 10);
 		strcat(key,d);
 	}
 	sprintf(url,"http://%s.tiles.virtualearth.net/tiles/a%s.jpeg?g=123",map->subdomians[r],key);
 }
 void initBingMap(MapProvider* map) {
 	//zoom max 21
-	map->name = (char*)malloc(16);
-	map->subdomians[0] = (char*)malloc(4);
-	map->subdomians[1] = (char*)malloc(4);
-	map->subdomians[2] = (char*)malloc(4);
-	map->subdomians[3] = (char*)malloc(4);
-	map->urlformat = 0;
-	map->imgformat = (char*)malloc(5);
 	map->makeurl = getBindUrl;
 
 	sprintf(map->name,"bing");
@@ -729,13 +798,6 @@ void getYahooUrl(void* map,Tile* tile, char* url){
 	(void)map;
 }
 void initYahooMap(MapProvider* map) {
-	map->name = (char*)malloc(16);
-	map->subdomians[0] = (char*)malloc(4);
-	map->subdomians[1] = (char*)malloc(4);
-	map->subdomians[2] = (char*)malloc(4);
-	map->subdomians[3] = (char*)malloc(4);
-	map->urlformat = 0;
-	map->imgformat = (char*)malloc(5);
 	map->makeurl = getYahooUrl;
 
 	sprintf(map->name,"yahoo");
@@ -747,13 +809,6 @@ void initYahooMap(MapProvider* map) {
 }
 
 void initYndexMap(MapProvider* map) {
-	map->name = (char*)malloc(16);
-	map->subdomians[0] = (char*)malloc(2);
-	map->subdomians[1] = (char*)malloc(2);
-	map->subdomians[2] = (char*)malloc(2);
-	map->subdomians[3] = (char*)malloc(2);
-	map->urlformat = (char*)malloc(128);
-	map->imgformat = (char*)malloc(6);
 	map->makeurl = 0;
 
 	sprintf(map->name,"yandex");
@@ -774,13 +829,13 @@ void initYndexMap(MapProvider* map) {
 }
 
 void destroyMap(MapProvider* map) {
-	free(map->name);
+	/*free(map->name);
 	free(map->subdomians[0]);
 	free(map->subdomians[1]);
 	free(map->subdomians[2]);
 	free(map->subdomians[3]);
 	free(map->urlformat);
-	free(map->imgformat);
+	free(map->imgformat);*/
 }
 
 void mapprovider_getFileName(MapProvider* map,Tile* tile,char* filename) {
@@ -813,11 +868,13 @@ stbi_uc* getImageData(Tile* tile) {
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
-			char tmp[L_tmpnam];
+			char tmp[64];
 			FILE* stream=0;
 			mapprovider_getUrlName(&map,tile,url);
 			mkpath(filename);
-			tmpnam(tmp);
+			//tmpnam(tmp);
+			strcpy(tmp,filename);
+			strcat(tmp,".tmp");
 			stream=fopen(tmp, "wb");
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, stream);
@@ -834,6 +891,24 @@ stbi_uc* getImageData(Tile* tile) {
 	return data;
 }
 
+//int last_r_count = -1;
+//int release_count;
+
+void tiles_limit() {
+	if(tiles->count > 512) {// 4*6*18=432. 512 tiles ~100mb texures
+		Tile* t = deque_pop_back(tiles);
+		if(t->z == 1) deque_push_front(tiles, t); // keep top tiles
+		else tile_release(t);
+		//else if(tile_release(t)) release_count++;
+		//if(tile_release(t)) print("to_draw release\n");
+	}
+	if(tiles_load->count > 100) {// free last from load safe??
+		Tile* t = deque_pop_back_s(tiles_load);
+		if(t->z == 1) deque_push_front_s(tiles_load, t); // keep top tiles
+		else tile_release(t);
+	}
+}
+
 void to_draw(int z, int x, int y) {
 	Tile tile = {z,x,y};
 	Tile* ret = tile_find(tiles, &tile);
@@ -847,21 +922,16 @@ void to_draw(int z, int x, int y) {
 		deque_push_front(tiles, newtile);
 		deque_push_front_s(tiles_load, newtile);
 
-		newtile->ref++;
+		//newtile->ref++;
 		tiles_draw[tiles_draw_count++] = newtile;
 
-		if(tiles->count > 512) {// 4*6*18=432. 512 tiles ~100mb texures
-			Tile* t = deque_pop_back(tiles);
-			if (t->z == 1) deque_push_front(tiles, t); // keep top tiles
-			else tile_release(t);
-			//if(tile_release(t)) print("to_draw release\n");
-		}
+		tiles_limit();
 
 		tile_release(newtile);
 	} else {
-		tile_tofirst_s(tiles_load,ret);
+		if(ret->texdata == 0) tile_tofirst_s(tiles_load,ret);
 		tile_tofirst(tiles,ret); // FIXME:!! second search
-		ret->ref++;
+		//ret->ref++;
 		tiles_draw[tiles_draw_count++] = ret;
 	}
 }
@@ -890,25 +960,25 @@ void make_tiles() {
 	crd_set2(&cbr,&center,br,br);
 	crd_zoomto(&cbr,baseZoom);
 
-	minCol = (int)floor(_mind(_mind(ctl.column,ctr.column),_mind(cbl.column,cbr.column)));
-	maxCol = (int)floor(_maxd(_maxd(ctl.column,ctr.column),_maxd(cbl.column,cbr.column)));
-	minRow = (int)floor(_mind(_mind(ctl.row,ctr.row),_mind(cbl.row,cbr.row)));
-	maxRow = (int)floor(_maxd(_maxd(ctl.row,ctr.row),_maxd(cbl.row,cbr.row)));
+	minCol = (int)floor(_mind(mind(ctl.column,ctr.column),mind(cbl.column,cbr.column)));
+	maxCol = (int)floor(_maxd(maxd(ctl.column,ctr.column),maxd(cbl.column,cbr.column)));
+	minRow = (int)floor(_mind(mind(ctl.row,ctr.row),mind(cbl.row,cbr.row)));
+	maxRow = (int)floor(_maxd(maxd(ctl.row,ctr.row),maxd(cbl.row,cbr.row)));
 
 	minCol -= 1;//FIXME: calc veiwport area
 	maxCol += 1;
 
 	row_count = (int)floor(pow(2.0, baseZoom))-1;
-	minCol = _maxi(0,minCol);
-	minRow = _maxi(0,minRow);
-	maxCol = _mini(maxCol,row_count);
-	maxRow = _mini(maxRow,row_count);
+	minCol = maxi(0,minCol);
+	minRow = maxi(0,minRow);
+	maxCol = mini(maxCol,row_count);
+	maxRow = mini(maxRow,row_count);
 
 	//print("area: %dx%d\n", (maxCol - minCol)+1, (maxRow - minRow)+1);
 
-	for(j = tiles_draw_count - 1; j>=0; --j) {
-		if (tile_release(tiles_draw[j])) print("make_tiles release\n");
-	}
+	/*for(j = tiles_draw_count - 1; j>=0; --j) {
+		if (tile_release(tiles_draw[j])) print("tiles_draw release\n");
+	}*/
 	tiles_draw_count = 0;
 	/*col = minCol;
 	for (; col <= maxCol; ++col) {
@@ -952,7 +1022,7 @@ void make_tiles() {
 		}
 	}*/
 	{
-		int j;
+		//int j;
 		int nx = maxCol;
 		int ny = maxRow;
 		int sx = minCol;
@@ -963,6 +1033,7 @@ void make_tiles() {
 		Tile t[128],p;
 		int t_count=0;
 		Node* node;
+		//release_count = 0;
 		//
 		while(n) {
 			for(j = sy; j <= ny; ++j) {
@@ -996,12 +1067,19 @@ void make_tiles() {
 						if(tt->z == p.z&&tt->x == p.x&&tt->y == p.y) { has = 1; break; }
 					}
 					if(!has) t[t_count++] = p;
-				} else tile_tofirst_s(tiles_load, c);
+				} else {
+					if (c->texdata == 0) tile_tofirst_s(tiles_load, c);
+				}
 				tile_parent(&p, &p);
 			}
 			node = node->next;
 		}
 		qsort(t,t_count,sizeof(Tile),cmp_tile);
+
+		/*if(last_t_count != t_count) {
+			print("last_t_count: %d\n", last_t_count);
+			last_t_count = t_count;
+		}*/
 
 		for(j = t_count-1; j >= 0; --j) {
 			Tile* newtile = (Tile*)malloc(sizeof(Tile));
@@ -1011,31 +1089,17 @@ void make_tiles() {
 			deque_push_front(tiles, newtile);
 			deque_push_front_s(tiles_load, newtile);
 
+			tiles_limit();
+
 			tile_release(newtile);
 		}
+
+		/*if(last_r_count != release_count) {
+			print("last_r_count: %d\n", release_count);
+			last_r_count = release_count;
+		}*/
 	}
 }
-
-const double pi180= M_PI/180.0;
-double getx(double lon,double zoom){
-	return ((lon + 180) / 360) * pow(2, zoom);
-}
-double gety(double lat,double zoom){
-	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) /2 * pow(2, zoom);
-}
-
-double getyp(double lon,double pzoom){
-	return ((lon + 180.0) / 360.0) * pzoom;
-}
-double getxp(double lat,double pzoom){
-	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) /2 * pzoom;
-}
-
-#if _MSC_VER < 1900
-double log2(double Value) {
-	return log(Value) * (1.4426950408889634073599246810019);
-}
-#endif
 
 void do_exit(void){
 	//destroy_synclist(tiles_get);
@@ -1043,165 +1107,6 @@ void do_exit(void){
 	//destroy_list(tiles);
 	//destroyMap(&map);
 }
-
-#pragma region begin
-//#define TEST_QUEUE 1
-#if TEST_QUEUE
-typedef struct {
-	float vtx[16];
-	GLuint tex;
-}Quad;
-
-typedef struct{
-	void* data;
-	short w,h;
-}TexData;
-
-Queue path_list;
-Queue tex_list;
-
-TexData* loadImageData(char* filename) {
-	stbi_uc* data;
-	int w,h,comp;
-	TexData* texdata;
-	data = stbi_load(filename,&w,&h,&comp,0);
-	if(data == 0) return 0;
-#define S 256
-	texdata = malloc(sizeof(TexData));
-	if(w != S || h != S) {
-		stbi_uc* out = malloc(S*S * 3);
-		stbir_resize_uint8(data, w, h, 0, out, S, S, 0, comp);
-		free(data);
-		texdata->data = out;
-		texdata->w = S;
-		texdata->h = S;
-	} else {
-		texdata->data = data;
-		texdata->w = w;
-		texdata->h = h;
-	}
-#undef S
-	//texdata->path = filename;
-	//texdata->gltex = 0;
-	return texdata;
-}
-
-#define _FOURCC(a, b, c, d) (a | (b << 8) | (c << 16) | (d << 24))
-
-void worker_path(void* param){
-	DIR *dir;
-	dirent *ent;
-	if ((dir = opendir(param)) != NULL){
-		while ((ent = readdir(dir)) != NULL){
-			if (ent->d_name[0]=='.') continue;
-			if (S_ISDIR(ent->d_type)){
-				char path[MAX_PATH];
-				
-				strcpy(path,param);
-				strcat(path,ent->d_name);
-				strcat(path,"/");
-				// recursive
-				worker_path(path);
-			}
-			else if (S_ISREG(ent->d_type)){
-				int jpg[3] = {
-					_FOURCC('.','j','p','g'),
-					_FOURCC('.','J','P','G'),
-					_FOURCC('j','p','e','g')
-				};
-				int ext = *(int*)&ent->d_name[ent->d_namlen-4];
-
-				if (ext == jpg[1] || ext == jpg[0] || ext == jpg[2]){
-					char* path = malloc(MAX_PATH);
-					int len = strlen(param);
-					strcpy(path,param);
-					strcat(path,ent->d_name);
-					//print("push %s\n",path);
-					//queues_push(&path_list,path);
-					queue_insert(&path_list,path);
-				}
-			}
-		}
-		closedir(dir);
-	}
-}
-
-void worker_load(void* param){
-	while(1){
-		char* path = queue_pop_wait(&path_list);
-		TexData* tdata = loadImageData(path);
-		//print("load %s\n",path);
-		if (tdata) queue_push(&tex_list,tdata);
-		free(path);
-	}
-}
-
-GLuint textures[4096];
-int textures_count;
-void make_textures(){
-	//int i = 0;
-	TexData* texd = queue_pop(&tex_list);
-	while (texd /*&& i<4*/){
-		GLuint textureId;
-		glGenTextures(1, &textureId);
-		glBindTexture(GL_TEXTURE_2D, textureId);
-		glTexImage2D(GL_TEXTURE_2D, 0, 3, texd->w, texd->h, 0, GL_RGB, GL_UNSIGNED_BYTE, texd->data);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		//mtx_lock(&queue_mtx);
-		free(texd->data);
-		free(texd);
-		//mtx_unlock(&queue_mtx);
-		textures[textures_count++] = textureId;
-		texd = queue_pop(&tex_list);
-		//++i;
-		//print("I: %d\n",i);
-	}
-}
-
-void Render(float f){
-	int i;
-	double tx;
-	double ty;
-
-	make_textures();
-
-	glClear(GL_COLOR_BUFFER_BIT);
-
-	glColor3f( 1.0f, 1.0f, 1.0f );
-	glEnable(GL_TEXTURE_2D);
-	for (i=0; i<textures_count; ++i) {
-		/*Tile* t = tiles_draw[i];
-
-		double scale = pow(2.0, center.zoom - t->z);
-		double ts = 256.0 * scale;
-		crd_t coord = center;
-		crd_zoomto(&coord,t->z);
-
-		tx = (t->x - coord.column) * ts;
-		ty = (t->y - coord.row) * ts;*/
-
-		double scale = pow(2.0, center.zoom-4);
-		double ts = 256 * scale;
-		crd_t coord = center;
-		crd_zoomto(&coord,4);
-		tx = (i/10 -2- coord.column) * ts;
-		ty = (i%10 -2- coord.row) * ts;
-
-		glBindTexture(GL_TEXTURE_2D, textures[i]);
-		glBegin(GL_TRIANGLE_STRIP);
-		glVertex2d(tx, ty); glTexCoord2f(0, 1);
-		glVertex2d(tx, ty+ts); glTexCoord2f(1, 0);
-		glVertex2d(tx+ts, ty); glTexCoord2f(1, 1);
-		glVertex2d(tx+ts, ty+ts); glTexCoord2f(0, 0);
-		glEnd();
-	}
-	glutSwapBuffers();
-}
-#endif
-#pragma endregion
 
 const char vert_src[]=
 "attribute vec4 a_pos;"
@@ -1239,19 +1144,6 @@ GLuint creatProg(const char* vert_src, const char* frag_src) {
 	glDeleteShader(frag_id);
 
 	return prog;
-}
-
-GLuint loadGLTexture(int w, int h, void* data){
-	GLuint tex;
-	glGenTextures(1, &tex);
-	glBindTexture(GL_TEXTURE_2D, tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, 3, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
-	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	free(data);
-	return tex;
 }
 
 int tile_make(Tile* t){
@@ -1399,6 +1291,7 @@ int tile_make_tex(Tile* t){
 	glGenTextures(1, &textureId);
 	glBindTexture(GL_TEXTURE_2D, textureId);
 	glTexImage2D(GL_TEXTURE_2D, 0, 3/*GL_COMPRESSED_RGB*/, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+	//glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1412,40 +1305,72 @@ int tile_make_tex(Tile* t){
 	vtx[14]= 1; vtx[15]= 1;
 	return 1;
 }
-void worker_load(void* param){
+#if _WIN32
+static DWORD WINAPI worker_load(void* param){
+#elif __linux
+static void* worker_load(void* param){
+#endif
 	mtx_t mtx;
 	void* data;
+	int n = (int)param;
 	mtx_init(&mtx);
 	while(1){
-		Tile* t = queue_pop_wait(tiles_load);
+		//print("%d wait\n",n);
+		//Tile* t = queue_pop_wait(tiles_load);
+		Tile* t;
+		cnd_wait(&tiles_load->cnd,&tiles_load->mtx);
+		t = queue_pop(tiles_load);
+		//print("%d get\n",n);
+		mtx_lock(&mtx);
 		if (!tile_release(t)){
 			t->ref += 1;
+			//if(tiles_loaded->count >= 40) sleep(10);
+			mtx_unlock(&mtx);
+			//print("%d load\n",n);
 			data = getImageData(t);
-			
+
+			mtx_lock(&mtx);
 			if (tile_release(t)){
-				print("release after load\n");
+				mtx_unlock(&mtx);
+				//print("release after load\n");
 				free(data);
 			} else {
-				mtx_lock(&mtx);
+				//mtx_lock(&mtx);
 				t->ref += 1;
 				t->texdata = data;
-				queue_push(tiles_loaded, t);
+				//queue_push(tiles_loaded, t);
+				array_push(tiles_loaded, t);
 				mtx_unlock(&mtx);
+				//print("%d push\n",n);
 			}
+		} else {
+			//print("thread release\n");
+			mtx_unlock(&mtx);
 		}
 	}
 	mtx_destroy(&mtx);
+	return 0;
 }
 int change=0;
 void Render(float f){
-	int i=0;
+	int i=0,j=0;
 	GLuint ltex=-1;
-	Tile *t = queue_pop(tiles_loaded);
+
+	Tile* t = array_pop(tiles_loaded);
 	while(t) {
-		tile_make_tex(t);
-		tile_release(t);
-		if(i++ == 1) break;
-		t = queue_pop(tiles_loaded);
+		if(t == tiles_loaded->end) {
+			print("tiles_loaded end\n");
+			t = array_pop(tiles_loaded);
+			continue;
+		}
+		//print("release loaded %p %2d %2d %2d\n", t, t->z, t->x, t->y);
+		if(!tile_release(t)) { // clear unused tiles
+			tile_make_tex(t);
+			if(++i == 2) break; // load by 1 texture or 2 or 5..
+		} /*else {
+			print("tiles_loaded release\n");
+		}*/
+		t = array_pop(tiles_loaded);
 		change = 1;
 	}
 
@@ -1453,11 +1378,11 @@ void Render(float f){
 		make_tiles();
 		updateQuads();
 		change = 0;
+		print("tiles_loaded count: %d\n",tiles_loaded->count);
 	}
 
 	glClear(GL_COLOR_BUFFER_BIT);
 
-//	glColor3f( 1.0f, 1.0f, 1.0f );
 	glEnable(GL_TEXTURE_2D);
 	glEnableVertexAttribArray(0);
 
@@ -1477,6 +1402,23 @@ void Render(float f){
 		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
+	
+	i = 0;
+	t = array_pop(tiles_release);
+	while(t) {
+		//print("release        %p %2d %2d %2d\n", t, t->z, t->x, t->y);
+		if(t->texdata) {
+			free(t->texdata);
+			t->texdata = 0;
+		}
+		if(t->tex) {
+			glDeleteTextures(1, &t->tex);
+			t->tex = 0;
+		}
+		free(t);
+		if(++i == 4) break;// release by 4 tiles
+		t = array_pop(tiles_release);
+	}
 }
 
 void Draw_empty(void){}
@@ -1489,17 +1431,48 @@ void Draw_empty(void){}
 };*/
 
 //55.3992609,-163.1431794
-double lon=-163.1441188,lat=55.3988969;
-crd_t fromPointToLatLng(crd_t point, int zoom);
-crd_t fromLatLngToPoint(double lat, double lon, int zoom);
+
+const double pi180 = M_PI / 180.0;
+double getx(double lon, double zoom) {
+	return ((lon + 180) / 360) * pow(2, zoom);
+}
+double gety(double lat, double zoom) {
+	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) / 2 * pow(2, zoom);
+}
+
+double getxp(double lon, double pzoom) {
+	return ((lon + 180.0) / 360.0) * pzoom;
+}
+double getyp(double lat, double pzoom) {
+	return (1 - log(tan(pi180*lat) + 1 / cos(pi180*lat)) / M_PI) / 2 * pzoom;
+}
+
+#if _MSC_VER < 1900
+double log2(double Value) {
+	return log(Value) * (1.4426950408889634073599246810019);
+}
+#endif
+
+//double lon = -163.1441188, lat = 55.3988969;
+//double lon = -71.06643059, lat = 42.35431920;
+#define NUM_POINTS 4
+double points[NUM_POINTS][3] = {
+	{-163.1441188, 55.3988969, 18.4},
+	{-71.06643059, 42.35431920, 18.4},
+	{139.62034836, -17.53323892, 18.4},
+	{18.41713920, -32.82673124, 18.4}
+};
+
+crd_t fromPointToLatLng(crd_t point, double zoom);
+crd_t fromLatLngToPoint(double lat, double lon, double zoom);
 void keyboard(unsigned char key,int x,int y){
 	if(key == 32) {
 //		double z,rx,ry;
 		crd_t ret;
 		print("row: %.16f column: %.16f zoom: %.16f\n",center.row,center.column,center.zoom);
-		ret = fromLatLngToPoint(lat,lon,18);
-		ret = fromPointToLatLng(ret,18);
-		print("lat: %.8f lon: %.8f",ret.x,ret.y);
+		//ret = fromLatLngToPoint(lat,lon, center.zoom);
+		ret = fromPointToLatLng(center, center.zoom);
+		print("lon: %.8f lat: %.8f\n",ret.x,ret.y);
 	}
 }
 
@@ -1526,12 +1499,12 @@ double bound(double val, double valMin, double valMax)
 	return res;
 }
 
-double degreesToRadians(double deg) 
+double degreesToRadians(double deg)
 {
 	return deg * (Math.PI / 180);
 }
 
-double radiansToDegrees(double rad) 
+double radiansToDegrees(double rad)
 {
 	return rad / (Math.PI / 180);
 }
@@ -1540,7 +1513,7 @@ PointF fromLatLngToPoint(double lat, double lng, int zoom)
 {
 	PointF point = new PointF(0, 0);
 
-	point.x = _pixelOrigin.x + lng * _pixelsPerLonDegree;       
+	point.x = _pixelOrigin.x + lng * _pixelsPerLonDegree;
 
 	// Truncating to 0.9999 effectively limits latitude to 89.189. This is
 	// about a third of a tile past the edge of the world tile.
@@ -1557,7 +1530,7 @@ PointF fromPointToLatLng(PointF point, int zoom)
 {
 	int numTiles = 1 << zoom;
 	point.x = point.x / numTiles;
-	point.y = point.y / numTiles;       
+	point.y = point.y / numTiles;
 
 	double lng = (point.x - _pixelOrigin.x) / _pixelsPerLonDegree;
 	double latRadians = (point.y - _pixelOrigin.y) / - _pixelsPerLonRadian;
@@ -1583,8 +1556,8 @@ double _pixelsPerLonRadian = TILE_SIZE / (2.0 * M_PI);
 
 double bound(double val, double valMin, double valMax){
 	double res;
-	res = _maxd(val, valMin);
-	res = _mind(res, valMax);
+	res = maxd(val, valMin);
+	res = mind(res, valMax);
 	return res;
 }
 
@@ -1596,34 +1569,36 @@ double radiansToDegrees(double rad){
 	return rad / pi180;
 }
 
-crd_t fromLatLngToPoint(double lat, double lon, int zoom){
+crd_t fromLatLngToPoint(double lat, double lon, double zoom){
 	crd_t point;// = new PointF(0, 0);
-	double siny;
-	int numTiles;
+	//double siny;
+	double numTiles;
 
-	point.x = _pixelOrigin[0] + lon * _pixelsPerLonDegree;       
+	point.x = getx(lon, zoom);// _pixelOrigin[0] + lon * _pixelsPerLonDegree;
 
 	// Truncating to 0.9999 effectively limits latitude to 89.189. This is
 	// about a third of a tile past the edge of the world tile.
-	siny = bound(sin(degreesToRadians(lat)), -0.9999,0.9999);
-	point.y = _pixelOrigin[1] + 0.5 * log((1.0 + siny) / (1.0 - siny)) * -_pixelsPerLonRadian;
+	//siny = bound(sin(degreesToRadians(lat)), -0.9999,0.9999);
+	//point.y = _pixelOrigin[1] + 0.5 * log((1.0 + siny) / (1.0 - siny)) * -_pixelsPerLonRadian;
+	point.y = gety(lat, zoom);
 
-	numTiles = 1 << zoom;
-	point.x = point.x * numTiles;
-	point.y = point.y * numTiles;
+	numTiles = pow(2,zoom);// 1 << zoom;
+	//point.x = point.x * numTiles;
+	//point.y = point.y * numTiles;
 	point.zoom = zoom;
 	return point;
 }
 
-crd_t fromPointToLatLng(crd_t point, int zoom){
+crd_t fromPointToLatLng(crd_t point, double zoom){
 	crd_t ret;
 	double lon,latRadians,lat;
-	int numTiles = 1 << zoom;
+	//int numTiles = 1 << zoom;
+	double numTiles = pow(2, zoom);
 	point.x = point.x / numTiles;
-	point.y = point.y / numTiles;       
+	point.y = point.y / numTiles;
 
-	lon = (point.x - _pixelOrigin[0]) / _pixelsPerLonDegree;
-	latRadians = (point.y - _pixelOrigin[1]) / - _pixelsPerLonRadian;
+	lon = (point.y - 0.5/*_pixelOrigin[0]*/) / (1/360.0)/*_pixelsPerLonDegree*/;
+	latRadians = (point.x - 0.5/*_pixelOrigin[1]*/) / -(1/(2.0 * M_PI))/*_pixelsPerLonRadian*/;
 	lat = radiansToDegrees(2 * atan(exp(latRadians)) - M_PI / 2);
 	ret.x = lon;
 	ret.y = lat;
@@ -1643,11 +1618,61 @@ int num_cores(){
 #endif
 } 
 
+double lerpd(double a, double b, double t) {
+	return a + t*(b - a);
+}
+
+
+typedef struct {
+	char** data;
+	int count;
+	int cap;
+}Array2;
+
+Array2* make_array2(int count) {
+	Array2* a = (Array2*)malloc(sizeof(Array2));
+	a->data = malloc(count * sizeof(void*));
+	a->count = 0;
+	a->cap = count;
+	return a;
+}
+
+void array_push2(Array2* a, void* data) {
+	if(a->count++ >= a->cap) {
+		a->cap += 20;
+		print("realloc: %d\n", a->cap);
+		a->data = realloc(a->data, a->cap * sizeof(void*));
+	}
+	a->data[a->count - 1] = data;
+}
+
+void* array_pop2(Array2* a) {
+	if(a->count) return a->data[--a->count];
+	return 0;
+}
 int main(int argc, char* argv[]) {
-	int i;
-	double z,startz;
+	int i,ip=0;
+	double z,startz,a=0,anim=0.004;
+	crd_t crd;
 	time_t tm;
+	int policy;
+    struct sched_param param;
+	//char* ch;
+	//Array2* arr = make_array2(2);
 	srand((unsigned int)time(&tm));
+	/*array_push2(arr, "1");
+	array_push2(arr, "2");
+	array_push2(arr, "3");
+	ch = array_pop2(arr);
+	ch = array_pop2(arr);*/
+	
+	pthread_getschedparam(pthread_self(), &policy, &param);
+	print("%d %d\n",policy,param.sched_priority);
+    param.sched_priority = sched_get_priority_max(2);
+	pthread_setschedparam(pthread_self(), 1, &param);
+	print("%d %d\n",policy,param.sched_priority);
+	param.sched_priority = sched_get_priority_min(2);
+	print("%d %d\n",policy,param.sched_priority);
 
 	glutInitWindowSize(veiwport[0], veiwport[1]);
 	glutInit(&argc, argv);
@@ -1680,17 +1705,20 @@ int main(int argc, char* argv[]) {
 	gladLoadGL();
 	prog = creatProg(vert_src,frag_src);
 	u_proj = glGetUniformLocation(prog, "u_proj");
-	crd_setz(&center,0.4,0.6,0);
+	crd_setz(&center,0.5,0.5,0);
 	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
 	lastzoom = (int)floor(center.zoom+0.5);
 	startz = center.zoom;
+	crd = fromPointToLatLng(center, startz);
 
 	tiles = make_queue();
 	tiles_load = make_queue();
-	tiles_loaded = make_queue();
+	tiles_loaded = make_array(64);
+	tiles_release = make_array(64);
+	//mtx_init(&g_mtx);
 
-	i = 8;// num_cores();
-	while(i--) StartThread(worker_load);
+	i = 1;// num_cores();
+	while(i--) StartThread(worker_load,i);
 	
 	make_tiles();
 #endif
@@ -1699,16 +1727,24 @@ int main(int argc, char* argv[]) {
 	for (;;){
 		glutMainLoopEvent();
 
-		if (z<18) {
+		//if (z<points[ip][3]) {
+		{
 			double zz,rx,ry;
-			z+=0.04;
-			center.zoom = z;
-			//crd_zoomto(&center,z);
-			//crd_zoomby(&center,0.04);
+			a +=anim;
+			if(a > 1) { a = 1; anim = -anim; }
+			if(a < 0) { 
+				a = 0; anim = -anim; 
+
+				if(ip++ >= NUM_POINTS-1) ip = 0;
+			}
+			center.zoom = lerpd(startz, points[ip][2], a);
 			zz = pow(2,center.zoom);
-			rx = getxp(lat,zz);
-			ry = getyp(lon,zz);
-			crd_set(&center,rx,ry);
+			rx = getxp(points[ip][0],zz);
+			ry = getyp(points[ip][1],zz);
+			//rx = lerpd(rx, getxp(0, zz),1-a);
+			//ry = lerpd(ry, getyp(0, zz),1-a);
+			crd_set(&center,ry,rx);
+
 			make_tiles();
 			updateQuads();
 		}
