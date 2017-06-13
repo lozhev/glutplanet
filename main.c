@@ -7,7 +7,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include <curl/curl.h>
-//#include "tinycthread.h"
 #include <search.h>
 #if defined(WIN32)
 #include <direct.h>
@@ -23,7 +22,7 @@
 
 
 #if _WIN32
-#define StartThread(start) CreateThread(NULL, 0, start, 0, 0, NULL)
+#define StartThread(start,arg) CreateThread(NULL, 0, start, (void*)arg, 0, NULL)
 typedef CRITICAL_SECTION mtx_t;
 #define mtx_init(m) InitializeCriticalSection(m)
 #define mtx_destroy(m) DeleteCriticalSection(m)
@@ -51,15 +50,11 @@ void print(const char* format, ...) {
 	OutputDebugStringA(buf);
 }
 #elif __linux
-//#include <sched.h>
-//#define __USE_GNU
 #include <pthread.h>
-//#include <bits/confname.h>
 #include <unistd.h>
 #define StartThread(start,arg) {\
 pthread_t th;\
 pthread_create(&th, 0, start, (void*)arg);\
-pthread_setschedparam(th, 1, &param);\
 }
 typedef pthread_mutex_t mtx_t;
 #define mtx_init(m) pthread_mutex_init(m, 0)
@@ -345,7 +340,7 @@ Queue* make_queue(){
 	cnd_init(&q->cnd);
 	return q;
 }
-
+//TODO: preallocated nodes
 void queue_push(Queue* q,void* data){
 	Node* n = (Node*)malloc(sizeof(Node));
 	n->data = data;
@@ -899,10 +894,8 @@ void tiles_limit() {
 		Tile* t = deque_pop_back(tiles);
 		if(t->z == 1) deque_push_front(tiles, t); // keep top tiles
 		else tile_release(t);
-		//else if(tile_release(t)) release_count++;
-		//if(tile_release(t)) print("to_draw release\n");
 	}
-	if(tiles_load->count > 100) {// free last from load safe??
+	if(tiles_load->count > 512) {// free last from load safe??
 		Tile* t = deque_pop_back_s(tiles_load);
 		if(t->z == 1) deque_push_front_s(tiles_load, t); // keep top tiles
 		else tile_release(t);
@@ -929,7 +922,7 @@ void to_draw(int z, int x, int y) {
 
 		tile_release(newtile);
 	} else {
-		if(ret->texdata == 0) tile_tofirst_s(tiles_load,ret);
+		tile_tofirst_s(tiles_load,ret);
 		tile_tofirst(tiles,ret); // FIXME:!! second search
 		//ret->ref++;
 		tiles_draw[tiles_draw_count++] = ret;
@@ -1067,9 +1060,7 @@ void make_tiles() {
 						if(tt->z == p.z&&tt->x == p.x&&tt->y == p.y) { has = 1; break; }
 					}
 					if(!has) t[t_count++] = p;
-				} else {
-					if (c->texdata == 0) tile_tofirst_s(tiles_load, c);
-				}
+				} else tile_tofirst_s(tiles_load, c);
 				tile_parent(&p, &p);
 			}
 			node = node->next;
@@ -1316,10 +1307,10 @@ static void* worker_load(void* param){
 	mtx_init(&mtx);
 	while(1){
 		//print("%d wait\n",n);
-		//Tile* t = queue_pop_wait(tiles_load);
-		Tile* t;
+		Tile* t = queue_pop_wait(tiles_load);
+		/*Tile* t;
 		cnd_wait(&tiles_load->cnd,&tiles_load->mtx);
-		t = queue_pop(tiles_load);
+		t = queue_pop(tiles_load);*/
 		//print("%d get\n",n);
 		mtx_lock(&mtx);
 		if (!tile_release(t)){
@@ -1655,8 +1646,8 @@ int main(int argc, char* argv[]) {
 	double z,startz,a=0,anim=0.004;
 	crd_t crd;
 	time_t tm;
-	int policy;
-    struct sched_param param;
+	//int policy;
+    //struct sched_param param;
 	//char* ch;
 	//Array2* arr = make_array2(2);
 	srand((unsigned int)time(&tm));
@@ -1666,13 +1657,13 @@ int main(int argc, char* argv[]) {
 	ch = array_pop2(arr);
 	ch = array_pop2(arr);*/
 	
-	pthread_getschedparam(pthread_self(), &policy, &param);
+	/*pthread_getschedparam(pthread_self(), &policy, &param);
 	print("%d %d\n",policy,param.sched_priority);
     param.sched_priority = sched_get_priority_max(2);
 	pthread_setschedparam(pthread_self(), 1, &param);
 	print("%d %d\n",policy,param.sched_priority);
 	param.sched_priority = sched_get_priority_min(2);
-	print("%d %d\n",policy,param.sched_priority);
+	print("%d %d\n",policy,param.sched_priority);*/
 
 	glutInitWindowSize(veiwport[0], veiwport[1]);
 	glutInit(&argc, argv);
@@ -1717,7 +1708,7 @@ int main(int argc, char* argv[]) {
 	tiles_release = make_array(64);
 	//mtx_init(&g_mtx);
 
-	i = 1;// num_cores();
+	i = 3;// num_cores();
 	while(i--) StartThread(worker_load,i);
 	
 	make_tiles();
@@ -1728,7 +1719,7 @@ int main(int argc, char* argv[]) {
 		glutMainLoopEvent();
 
 		//if (z<points[ip][3]) {
-		{
+		/*{
 			double zz,rx,ry;
 			a +=anim;
 			if(a > 1) { a = 1; anim = -anim; }
@@ -1747,7 +1738,7 @@ int main(int argc, char* argv[]) {
 
 			make_tiles();
 			updateQuads();
-		}
+		}*/
 
 		Render(0);
 		glutSwapBuffers();
