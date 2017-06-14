@@ -83,8 +83,9 @@ typedef struct Tile {
 	GLuint ptex;      // parent texture
 	stbi_uc* texdata; // image
 	float vtx[16];    // vertices
-	int del;          // delete texture
-	volatile int ref;
+	int download;     // download
+	char* filename;
+	volatile int ref; // has effect volatile??
 } Tile;
 
 void tile_init(Tile* t,int x,int y,int z){
@@ -94,7 +95,8 @@ void tile_init(Tile* t,int x,int y,int z){
 	t->tex = 0;
 	t->ptex = 0;
 	t->texdata = 0;
-	t->del = 0;
+	t->download = 0;
+	t->filename = 0;
 	t->ref = 1;
 }
 
@@ -340,7 +342,7 @@ Queue* make_queue(){
 	cnd_init(&q->cnd);
 	return q;
 }
-//TODO: preallocated nodes
+//TODO: preallocated nodes??
 void queue_push(Queue* q,void* data){
 	Node* n = (Node*)malloc(sizeof(Node));
 	n->data = data;
@@ -525,18 +527,18 @@ void array_push(Array* a, void* data) {
 	if(a->count == a->cap) {
 		int i;
 		void** data;
-		a->cap += 20;
+		a->cap += 128;
 		print("realloc: %3d %p count: %d\n", a->cap, a, a->count);
-		//mtx_lock(&g_mtx);
+		mtx_lock(&g_mtx);
 		//a->data = realloc(a->data, a->cap * sizeof(void*));
 		data = malloc(a->cap * sizeof(void*));
-		//mtx_unlock(&g_mtx);
 		for(i = 0; i < a->count; ++i) {
 			data[i] = a->data[i];
 			//print("%d %p\n", i, t);// print_tile(t);
 		}
 		free(a->data);
 		a->data = data;
+		mtx_unlock(&g_mtx);
 	}
 	a->data[a->count++] = data;
 }
@@ -610,13 +612,13 @@ void tile_tofirst(Queue* q, Tile* tile) {
 	return;
 }
 
-void tile_tofirst_s(Queue* q, Tile* tile) {
+int tile_tofirst_s(Queue* q, Tile* tile) {
 	Node* cur;// = q->first;
 	int has=0;
 	mtx_lock(&q->mtx);
 	if(q->count < 1) {
 		mtx_unlock(&q->mtx);
-		return;
+		return 0;
 	}
 
 	cur = q->first;
@@ -627,7 +629,7 @@ void tile_tofirst_s(Queue* q, Tile* tile) {
 	}
 	if(!has || q->first == cur) {
 		mtx_unlock(&q->mtx);
-		return;
+		return 0;
 	}
 
 	cur->prev->next = cur->next;
@@ -642,7 +644,7 @@ void tile_tofirst_s(Queue* q, Tile* tile) {
 	cur->prev = 0;
 	q->first = cur;
 	mtx_unlock(&q->mtx);
-	return;
+	return 1;
 }
 
 // IO funcs
@@ -771,7 +773,8 @@ void getBindUrl(void* m,Tile* tile, char* url){
 		sprintf(d, "%d", digit); //itoa(digit, d, 10);
 		strcat(key,d);
 	}
-	sprintf(url,"http://%s.tiles.virtualearth.net/tiles/a%s.jpeg?g=123",map->subdomians[r],key);
+	i = sprintf(url,"http://%s.tiles.virtualearth.net/tiles/a%s.jpeg?g=123",map->subdomians[r],key);
+	assert(i<128);
 }
 void initBingMap(MapProvider* map) {
 	//zoom max 21
@@ -834,7 +837,8 @@ void destroyMap(MapProvider* map) {
 }
 
 void mapprovider_getFileName(MapProvider* map,Tile* tile,char* filename) {
-	sprintf(filename,"%s/%d/%d/%d.%s",map->name,tile->z,tile->x,tile->y,map->imgformat);
+	int n = sprintf(filename,"%s/%d/%d/%d.%s",map->name,tile->z,tile->x,tile->y,map->imgformat);
+	assert(n<64);
 }
 
 void mapprovider_getUrlName(MapProvider* map,Tile* tile,char* url) {
@@ -842,7 +846,8 @@ void mapprovider_getUrlName(MapProvider* map,Tile* tile,char* url) {
 		map->makeurl(map,tile,url);
 	} else {
 		int r = rand()%4;
-		sprintf(url,map->urlformat,map->subdomians[r],tile->z,tile->x,tile->y,map->imgformat);
+		r = sprintf(url,map->urlformat,map->subdomians[r],tile->z,tile->x,tile->y,map->imgformat);
+		assert(r<128);
 	}
 }
 
@@ -857,9 +862,10 @@ stbi_uc* getImageData(Tile* tile) {
 	stbi_uc* data=0;
 	int w,h,comp;
 	mapprovider_getFileName(&map,tile,filename);
-	if(exists(filename)) {
-		data = stbi_load(filename, &w, &h, &comp, 0);
-	} else {
+	//if(exists(filename)) {
+	//	data = stbi_load(filename, &w, &h, &comp, 0);
+	//} else 
+	{
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
@@ -870,6 +876,7 @@ stbi_uc* getImageData(Tile* tile) {
 			//tmpnam(tmp);
 			strcpy(tmp,filename);
 			strcat(tmp,".tmp");
+			assert(strlen(tmp)<64);
 			stream=fopen(tmp, "wb");
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, stream);
@@ -895,11 +902,36 @@ void tiles_limit() {
 		if(t->z == 1) deque_push_front(tiles, t); // keep top tiles
 		else tile_release(t);
 	}
-	if(tiles_load->count > 512) {// free last from load safe??
+	/*if(tiles_load->count > 512) {// free last from load safe??
 		Tile* t = deque_pop_back_s(tiles_load);
 		if(t->z == 1) deque_push_front_s(tiles_load, t); // keep top tiles
 		else tile_release(t);
+	}*/
+}
+
+Tile* tile_new(int x, int y, int z){
+	char filename[64];
+	Tile* newtile = (Tile*)malloc(sizeof(Tile));
+	tile_init(newtile, x, y, z);
+	tile_make(newtile);
+
+	mapprovider_getFileName(&map,newtile,filename);
+	if(exists(filename)){
+		newtile->filename = strdup(filename);
+		array_push(tiles_loaded, newtile);
+	} else {
+		newtile->download = 1;
+		if (tile_tofirst_s(tiles_load,newtile) == 0){
+			deque_push_front_s(tiles_load, newtile);
+		} else {
+			print("new in load\n");
+		}
 	}
+
+	newtile->ref+=1;
+	deque_push_front(tiles, newtile);
+	
+	return newtile;
 }
 
 void to_draw(int z, int x, int y) {
@@ -907,20 +939,20 @@ void to_draw(int z, int x, int y) {
 	Tile* ret = tile_find(tiles, &tile);
 
 	if(ret == 0) {
-		Tile* newtile = (Tile*)malloc(sizeof(Tile));
+		/*Tile* newtile = (Tile*)malloc(sizeof(Tile));
 		tile_init(newtile, tile.x, tile.y, tile.z);
 		tile_make(newtile);
 
 		newtile->ref+=2;
 		deque_push_front(tiles, newtile);
-		deque_push_front_s(tiles_load, newtile);
+		deque_push_front_s(tiles_load, newtile);*/
 
-		//newtile->ref++;
+		Tile* newtile = tile_new(x,y,z);
 		tiles_draw[tiles_draw_count++] = newtile;
 
 		tiles_limit();
 
-		tile_release(newtile);
+		//tile_release(newtile);
 	} else {
 		tile_tofirst_s(tiles_load,ret);
 		tile_tofirst(tiles,ret); // FIXME:!! second search
@@ -1060,7 +1092,10 @@ void make_tiles() {
 						if(tt->z == p.z&&tt->x == p.x&&tt->y == p.y) { has = 1; break; }
 					}
 					if(!has) t[t_count++] = p;
-				} else tile_tofirst_s(tiles_load, c);
+				} else {
+					tile_tofirst(tiles, c);
+					tile_tofirst_s(tiles_load, c);
+				}
 				tile_parent(&p, &p);
 			}
 			node = node->next;
@@ -1073,16 +1108,17 @@ void make_tiles() {
 		}*/
 
 		for(j = t_count-1; j >= 0; --j) {
-			Tile* newtile = (Tile*)malloc(sizeof(Tile));
+			/*Tile* newtile = (Tile*)malloc(sizeof(Tile));
 			tile_init(newtile, t[j].x, t[j].y, t[j].z);
 
 			newtile->ref += 2;
 			deque_push_front(tiles, newtile);
-			deque_push_front_s(tiles_load, newtile);
+			deque_push_front_s(tiles_load, newtile);*/
+			Tile* newtile = tile_new(t[j].x, t[j].y, t[j].z);
 
 			tiles_limit();
 
-			tile_release(newtile);
+			//tile_release(newtile);
 		}
 
 		/*if(last_r_count != release_count) {
@@ -1281,14 +1317,24 @@ int tile_make_tex(Tile* t){
 	float* vtx = t->vtx;
 	glGenTextures(1, &textureId);
 	glBindTexture(GL_TEXTURE_2D, textureId);
-	glTexImage2D(GL_TEXTURE_2D, 0, 3/*GL_COMPRESSED_RGB*/, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
-	//glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+	if (t->filename){
+		int w,h,comp;
+		stbi_uc* data = stbi_load(t->filename, &w, &h, &comp, 0);
+		glTexImage2D(GL_TEXTURE_2D, 0, 3, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+		free(data);
+		free(t->filename);
+		t->filename=0;
+	}else{
+		glTexImage2D(GL_TEXTURE_2D, 0, 3/*GL_COMPRESSED_RGB*/, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+		//glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 256, 256, 0, GL_RGB, GL_UNSIGNED_BYTE, t->texdata);
+		free(t->texdata);
+		t->texdata = 0;
+	}
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	free(t->texdata);
-	t->texdata = 0;
+
 	t->tex = textureId;
 	vtx[2] = 0; vtx[3] = 0;
 	vtx[6] = 0; vtx[7] = 1;
@@ -1304,7 +1350,7 @@ static void* worker_load(void* param){
 	mtx_t mtx;
 	void* data;
 	int n = (int)param;
-	mtx_init(&mtx);
+	//mtx_init(&mtx);
 	while(1){
 		//print("%d wait\n",n);
 		Tile* t = queue_pop_wait(tiles_load);
@@ -1312,34 +1358,34 @@ static void* worker_load(void* param){
 		cnd_wait(&tiles_load->cnd,&tiles_load->mtx);
 		t = queue_pop(tiles_load);*/
 		//print("%d get\n",n);
-		mtx_lock(&mtx);
+		mtx_lock(&tiles_load->mtx);
 		if (!tile_release(t)){
 			t->ref += 1;
-			//if(tiles_loaded->count >= 40) sleep(10);
-			mtx_unlock(&mtx);
+			mtx_unlock(&tiles_load->mtx);
 			//print("%d load\n",n);
 			data = getImageData(t);
 
-			mtx_lock(&mtx);
+			mtx_lock(&tiles_load->mtx);
 			if (tile_release(t)){
-				mtx_unlock(&mtx);
-				//print("release after load\n");
+				mtx_unlock(&tiles_load->mtx);
+				print("release after load\n");
 				free(data);
 			} else {
 				//mtx_lock(&mtx);
 				t->ref += 1;
 				t->texdata = data;
+				t->download = 0;
 				//queue_push(tiles_loaded, t);
 				array_push(tiles_loaded, t);
-				mtx_unlock(&mtx);
+				mtx_unlock(&tiles_load->mtx);
 				//print("%d push\n",n);
 			}
 		} else {
 			//print("thread release\n");
-			mtx_unlock(&mtx);
+			mtx_unlock(&tiles_load->mtx);
 		}
 	}
-	mtx_destroy(&mtx);
+	//mtx_destroy(&mtx);
 	return 0;
 }
 int change=0;
@@ -1357,7 +1403,8 @@ void Render(float f){
 		//print("release loaded %p %2d %2d %2d\n", t, t->z, t->x, t->y);
 		if(!tile_release(t)) { // clear unused tiles
 			tile_make_tex(t);
-			if(++i == 2) break; // load by 1 texture or 2 or 5..
+			change = 1;
+			if(++i == 1) break; // load by 1 texture or 2 or 5..
 		} /*else {
 			print("tiles_loaded release\n");
 		}*/
@@ -1369,7 +1416,7 @@ void Render(float f){
 		make_tiles();
 		updateQuads();
 		change = 0;
-		print("tiles_loaded count: %d\n",tiles_loaded->count);
+		//print("tiles_loaded count: %d\n",tiles_loaded->count);
 	}
 
 	glClear(GL_COLOR_BUFFER_BIT);
@@ -1398,6 +1445,10 @@ void Render(float f){
 	t = array_pop(tiles_release);
 	while(t) {
 		//print("release        %p %2d %2d %2d\n", t, t->z, t->x, t->y);
+		if(t->filename) {
+			free(t->filename);
+			t->filename = 0;
+		}
 		if(t->texdata) {
 			free(t->texdata);
 			t->texdata = 0;
@@ -1646,25 +1697,7 @@ int main(int argc, char* argv[]) {
 	double z,startz,a=0,anim=0.004;
 	crd_t crd;
 	time_t tm;
-	//int policy;
-    //struct sched_param param;
-	//char* ch;
-	//Array2* arr = make_array2(2);
 	srand((unsigned int)time(&tm));
-	/*array_push2(arr, "1");
-	array_push2(arr, "2");
-	array_push2(arr, "3");
-	ch = array_pop2(arr);
-	ch = array_pop2(arr);*/
-	
-	/*pthread_getschedparam(pthread_self(), &policy, &param);
-	print("%d %d\n",policy,param.sched_priority);
-    param.sched_priority = sched_get_priority_max(2);
-	pthread_setschedparam(pthread_self(), 1, &param);
-	print("%d %d\n",policy,param.sched_priority);
-	param.sched_priority = sched_get_priority_min(2);
-	print("%d %d\n",policy,param.sched_priority);*/
-
 	glutInitWindowSize(veiwport[0], veiwport[1]);
 	glutInit(&argc, argv);
 	glutInitDisplayMode(GLUT_RGB | GLUT_DOUBLE);
@@ -1706,7 +1739,7 @@ int main(int argc, char* argv[]) {
 	tiles_load = make_queue();
 	tiles_loaded = make_array(64);
 	tiles_release = make_array(64);
-	//mtx_init(&g_mtx);
+	mtx_init(&g_mtx);
 
 	i = 3;// num_cores();
 	while(i--) StartThread(worker_load,i);
@@ -1718,16 +1751,16 @@ int main(int argc, char* argv[]) {
 	for (;;){
 		glutMainLoopEvent();
 
-		//if (z<points[ip][3]) {
-		/*{
+		if (a<1)
+		{
 			double zz,rx,ry;
 			a +=anim;
-			if(a > 1) { a = 1; anim = -anim; }
+			/*if(a > 1) { a = 1; anim = -anim; }
 			if(a < 0) { 
 				a = 0; anim = -anim; 
 
 				if(ip++ >= NUM_POINTS-1) ip = 0;
-			}
+			}*/
 			center.zoom = lerpd(startz, points[ip][2], a);
 			zz = pow(2,center.zoom);
 			rx = getxp(points[ip][0],zz);
@@ -1738,7 +1771,7 @@ int main(int argc, char* argv[]) {
 
 			make_tiles();
 			updateQuads();
-		}*/
+		}
 
 		Render(0);
 		glutSwapBuffers();
@@ -1746,3 +1779,271 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
+
+
+#if TEST_DB
+#include <stdio.h>
+#include <windows.h>
+#include <process.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "../../stb/stb_image.h"
+#include "../dirent.h"
+#include <boost/timer.hpp>
+#include <boost/filesystem.hpp>
+#include <queue>
+#include <sstream>
+#include <leveldb/c.h>
+#include <snappy-c.h>
+#include "lz4.h"
+
+namespace fs = boost::filesystem;
+
+namespace boost{
+	void throw_exception( std::exception const & e ){}
+}
+
+void print(const char* format, ...) {
+	char buf[256];
+	va_list argptr;
+	va_start(argptr, format);
+	vsprintf(buf, format, argptr);
+	va_end(argptr);
+	OutputDebugStringA(buf);
+}
+
+std::vector<std::string> paths;
+
+void add_path(const fs::path& path){
+	fs::directory_iterator dir(path);
+	for(;dir!=fs::directory_iterator();dir++){
+		const fs::directory_entry& e = *dir;
+		const fs::file_status& sf = e.status();
+		if (sf.type() == fs::directory_file)
+			add_path(e.path());
+		else if (sf.type() == fs::regular_file)
+			paths.push_back(e.path().string());
+	}
+}
+
+int main(int argc,char** argv){
+	fs::path path("bing/7");
+	boost::timer timer;
+	add_path(path);
+	print("add %f\n",timer.elapsed());
+
+	leveldb_t* db, *db_comp;//, *db_nocomp;
+	leveldb_env_t* env;
+	leveldb_options_t* options;
+	leveldb_writeoptions_t* woptions;
+	leveldb_readoptions_t* roptions;
+	char* err = NULL;
+	env = leveldb_create_default_env();
+	options = leveldb_options_create();
+	leveldb_options_set_create_if_missing(options, 1);
+	// def 4<<20 write db 31.329000
+	// 16<<20 write db 18.969000
+	leveldb_options_set_write_buffer_size(options,16<<20);
+	db = leveldb_open(options, "bing1", &err);
+	woptions = leveldb_writeoptions_create();
+	roptions = leveldb_readoptions_create();
+
+	std::vector<std::string>::const_iterator iter;
+
+	timer.restart();
+	iter = paths.begin();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		int w,h,c;
+		stbi_uc* data = stbi_load(name.c_str(),&w,&h,&c,0);
+		free(data);
+		++iter;
+	}
+	print("read file %f\n",timer.elapsed());
+
+	/*timer.restart();
+	iter = paths.begin();
+	int counter = 0;
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		int w,h,c;
+		stbi_uc* data = stbi_load(name.c_str(),&w,&h,&c,0);
+		char fname[64];
+		sprintf(fname,"bing_fs/%d.data",counter++);
+		FILE* f = fopen(fname,"wb");
+		fwrite(data,196608,1,f);
+		fclose(f);
+		free(data);
+		++iter;
+	}
+	print("write file %f\n",timer.elapsed());*/
+
+	timer.restart();
+	iter = paths.begin();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		FILE* f = fopen(name.c_str(),"rb");
+		fseek(f, 0,SEEK_END);
+		int data_size = ftell(f);
+		fseek(f, 0,SEEK_SET);
+		char* data = (char*)malloc(data_size);
+		fread(data,data_size,1,f);
+		fclose(f);
+		leveldb_put(db, woptions, name.c_str(), name.size(), data, data_size, &err);
+		free(data);
+		++iter;
+	}
+	print("write db jpg %f\n",timer.elapsed());
+
+	/*timer.restart();
+	iter = paths.begin();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		int w,h,c;
+		stbi_uc* data = stbi_load(name.c_str(),&w,&h,&c,0);
+		leveldb_put(db, woptions, name.c_str(), name.size(), (const char*)data, 196608, &err);
+		free(data);
+		++iter;
+	}
+	print("write db %f\n",timer.elapsed());*/
+
+	timer.restart();
+	iter = paths.begin();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		size_t data_size;
+		char* data = leveldb_get(db, roptions, name.c_str(), name.size(), &data_size, &err);
+		int w,h,c;
+		stbi_uc* img = stbi_load_from_memory((stbi_uc*)data,data_size,&w,&h,&c,0);
+		free(img);
+
+		free(data);
+		++iter;
+	}
+	print("read db %f\n",timer.elapsed());
+
+	/*leveldb_options_set_compression(options,0);
+	db_nocomp = leveldb_open(options, "bing_nocomp", &err);
+	timer.restart();
+	iter = paths.begin();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		int w,h,c;
+		stbi_uc* data = stbi_load(name.c_str(),&w,&h,&c,0);
+		leveldb_put(db_nocomp, woptions, name.c_str(), name.size(), (const char*)data, 196608, &err);
+		free(data);
+		++iter;
+	}
+	print("write db nocomp %f\n",timer.elapsed());*/
+
+	/*db_comp = leveldb_open(options, "bing_comp", &err);
+
+	timer.restart();
+	iter = paths.begin();
+	//leveldb_writebatch_t* wb = leveldb_writebatch_create();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		int w,h,c;
+		stbi_uc* data = stbi_load(name.c_str(),&w,&h,&c,0);
+		/*size_t comp_length = snappy_max_compressed_length(196608);
+		char* comp = (char*)malloc(comp_length);
+		snappy_status s = snappy_compress((const char*)data, 196608, comp, &comp_length);* /
+		size_t comp_length = LZ4_compressBound(196608);
+		char* comp = (char*)malloc(comp_length);
+		comp_length = LZ4_compress_default((const char*)data, comp, 196608, comp_length);
+		leveldb_put(db_comp, woptions, name.c_str(), name.size(), comp, comp_length, &err);
+		//leveldb_writebatch_put(wb, name.c_str(), name.size(), comp, comp_length);
+		free(data);
+		free(comp);
+		++iter;
+	}
+	//leveldb_write(db_comp, woptions, wb, &err); 
+	//leveldb_writebatch_destroy(wb);
+	print("write lz db compressed %f\n",timer.elapsed());
+	//Sleep(10000);
+	leveldb_close(db_comp);
+
+	leveldb_options_set_compression(options,0);
+	db_comp = leveldb_open(options, "bing_nocomp", &err);
+
+	timer.restart();
+	iter = paths.begin();
+	//wb = leveldb_writebatch_create();
+	while(iter!=paths.end()){
+		const std::string& name = *iter;
+		int w,h,c;
+		stbi_uc* data = stbi_load(name.c_str(),&w,&h,&c,0);
+		/*size_t comp_length = snappy_max_compressed_length(196608);
+		char* comp = (char*)malloc(comp_length);
+		snappy_compress((const char*)data, 196608, comp, &comp_length);* /
+		size_t comp_length = LZ4_compressBound(196608);
+		char* comp = (char*)malloc(comp_length);
+		comp_length = LZ4_compress_default((const char*)data, comp, 196608, comp_length);
+		leveldb_put(db_comp, woptions, name.c_str(), name.size(), comp, comp_length, &err);
+		//leveldb_writebatch_put(wb, name.c_str(), name.size(), comp, comp_length);
+		free(data);
+		free(comp);
+		++iter;
+	}
+	//leveldb_write(db_comp, woptions, wb, &err); 
+	//leveldb_writebatch_destroy(wb);
+	print("write lz db %f\n",timer.elapsed());
+	//Sleep(10000);
+	leveldb_close(db_comp);*/
+
+	leveldb_close(db);
+	leveldb_options_destroy(options);
+	leveldb_readoptions_destroy(roptions);
+	leveldb_writeoptions_destroy(woptions);
+	leveldb_env_destroy(env);
+}
+
+/*
+765 files
+
+jpeg 12,8(13 451 144)
+     14,2(14 970 880)
+
+db jpg 12,8(13 485 244)
+       12,8(13 500 416)
+
+raw 143(150 405 120)
+    143(150 405 120)
+
+db  118(124 715 475)
+    118(124 751 872)
+
+add 0.156000
+read file 4.766000
+write file 9.078000
+write db 17.188000
+read db 2.015000
+
+read file 4.703000
+write file 5.687000
+write db 17.766000
+read db 2.235000
+
+add 0.141000
+read file 4.703000
+write file 6.531000
+write db 17.391000
+read db 2.282000
+
+write lz db 15.828000                  108(114 269 409)
+write lz db compressed 16.297000       108(114 204 293)
+write lz db 13.751000
+write lz db compressed 16.782000
+
+
+read file 4.609000
+read file 4.578000
+read file 4.516000
+read db jpg 4.453000
+read db jpg 4.547000
+read db jpg 4.437000
+
+write db jpg 0.688000
+write db jpg 0.687000
+write db jpg 0.718000
+*/
+#endif
