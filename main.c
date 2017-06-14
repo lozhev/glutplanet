@@ -2047,3 +2047,408 @@ write db jpg 0.687000
 write db jpg 0.718000
 */
 #endif
+
+#if 0
+#include <windows.h>
+#include <stdio.h>
+#include "../dirent.h"
+#include <direct.h>
+#include <time.h>
+
+#include "rocksdb/c.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "../../stb/stb_image.h"
+
+void bz_internal_error(int errcode) {}
+
+void print(const char* format, ...) {
+	char buf[256];
+	va_list argptr;
+	va_start(argptr, format);
+	vsprintf(buf, format, argptr);
+	va_end(argptr);
+	OutputDebugStringA(buf);
+}
+
+// Queue
+typedef struct Node {
+	char* data;
+	struct Node* next, *prev;
+}Node;
+
+typedef struct {
+	Node* first, *last;
+
+	//mtx_t mtx;
+	//cnd_t cnd;
+	int count;
+}Queue;
+
+Queue* make_queue() {
+	Queue *q = malloc(sizeof(Queue));
+	q->first = 0;
+	q->last = 0;
+	q->count = 0;
+	//	mtx_init(&q->mtx);
+	//	cnd_init(&q->cnd);
+	return q;
+}
+
+void queue_push(Queue* q, void* data) {
+	Node* n = (Node*)malloc(sizeof(Node));
+	n->data = data;
+	if(q->last) {
+		q->last->next = n;
+	} else {
+		q->first = n;
+	}
+	n->next = 0;
+	q->last = n;
+	++q->count;
+}
+
+void* queue_pop(Queue* q) {
+	if(q->count) {
+		Node* n = q->first;
+		void* ret = n->data;
+		q->first = n->next;
+		if(--q->count == 0) q->last = 0;
+		free(n);
+		return ret;
+	}
+	return 0;
+}
+
+Queue path_list;
+
+#define _FOURCC(a, b, c, d) (a | (b << 8) | (c << 16) | (d << 24))
+
+void worker_path(void* param) {
+	DIR *dir;
+	dirent *ent;
+	if((dir = opendir(param)) != NULL) {
+		while((ent = readdir(dir)) != NULL) {
+			if(ent->d_name[0] == '.') continue;
+			if(S_ISDIR(ent->d_type)) {
+				char path[MAX_PATH];
+
+				strcpy(path, param);
+				strcat(path, ent->d_name);
+				strcat(path, "/");
+				// recursive
+				worker_path(path);
+			} else if(S_ISREG(ent->d_type)) {
+				int jpg[3] = {
+					_FOURCC('.','j','p','g'),
+					_FOURCC('.','J','P','G'),
+					_FOURCC('j','p','e','g')
+				};
+				int ext = *(int*)&ent->d_name[ent->d_namlen - 4];
+
+				if(ext == jpg[1] || ext == jpg[0] || ext == jpg[2]) {
+					char* path = malloc(MAX_PATH);
+					//int len = strlen(param);
+					strcpy(path, &((char*)param)[2]);
+					strcat(path, ent->d_name);
+					//print("push %s\n",path);
+					queue_push(&path_list, path);
+					//queue_insert(&path_list, path);
+				}
+			}
+		}
+		closedir(dir);
+	}
+}
+
+#define WRITE_IMG 0
+
+int main(int argc, char* argv[]) {
+	clock_t start;
+	double no, spy, bz, lz, lzhc, xp;
+	Node* n;
+	rocksdb_t* db;
+	rocksdb_env_t* env;
+	rocksdb_options_t* options;
+	//rocksdb_readoptions_t* roptions;
+	rocksdb_writeoptions_t* woptions;
+	print("ok\n");
+
+	_chdir("bing");
+	worker_path("./");
+
+	print("path ok\n");
+	env = rocksdb_create_default_env();
+	woptions = rocksdb_writeoptions_create();
+
+	options = rocksdb_options_create();
+	rocksdb_options_set_create_if_missing(options, 1);
+	rocksdb_options_set_paranoid_checks(options, 0);
+
+	rocksdb_options_set_compression(options, rocksdb_no_compression);
+	db = rocksdb_open(options, "bind_tmp", 0);
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	no = _difftime64(clock(), start) / CLK_TCK;
+
+	// ==============================================================
+	rocksdb_options_set_compression(options, rocksdb_no_compression);
+	db = rocksdb_open(options, "bind_no", 0);
+
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	no = _difftime64(clock(), start) / CLK_TCK;
+
+
+	rocksdb_options_set_compression(options, rocksdb_snappy_compression);
+	db = rocksdb_open(options, "bind_snappy", 0);
+
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	spy = _difftime64(clock(), start) / CLK_TCK;
+
+
+
+
+	rocksdb_options_set_compression(options, rocksdb_bz2_compression);
+	db = rocksdb_open(options, "bind_bz2", 0);
+
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	bz = _difftime64(clock(), start) / CLK_TCK;
+
+
+
+
+	rocksdb_options_set_compression(options, rocksdb_lz4_compression);
+	db = rocksdb_open(options, "bind_lz4", 0);
+
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	lz = _difftime64(clock(), start) / CLK_TCK;
+	print("bind_lz4 %f\n", lz);
+
+
+
+
+	rocksdb_options_set_compression(options, rocksdb_lz4hc_compression);
+	db = rocksdb_open(options, "bind_lz4hc", 0);
+
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	lzhc = _difftime64(clock(), start) / CLK_TCK;
+	print("bind_lz4 %f\n", lzhc);
+
+
+
+
+	rocksdb_options_set_compression(options, rocksdb_xpress_compression);
+	db = rocksdb_open(options, "bind_xpress", 0);
+
+	start = clock();
+	n = path_list.first;
+	while(n) {
+		char* path = n->data;
+#if WRITE_IMG
+		FILE* f = fopen(path, "rb");
+		fseek(f, 0, SEEK_END);
+		int size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		char* data = (char*)malloc(size);
+		fread(data, 1, size, f);
+		fclose(f);
+#else
+		int w, h, c;
+		char* data = stbi_load(path, &w, &h, &c, 0);
+		int size = 196608;
+#endif
+		rocksdb_put(db, woptions, path, strlen(path), data, size, 0);
+		free(data);
+		n = n->next;
+	}
+	rocksdb_close(db);
+	xp = _difftime64(clock(), start) / CLK_TCK;
+
+	print("bind_no %f\n", no);
+	print("bind_snappy %f\n", spy);
+	print("bind_bz2 %f\n", bz);
+	print("bind_lz4 %f\n", lz);
+	print("bind_lz4hc %f\n", lzhc);
+	print("bind_xpress %f\n", xp);
+
+	rocksdb_options_destroy(options);
+	rocksdb_writeoptions_destroy(woptions);
+	rocksdb_env_join_all_threads(env);
+	rocksdb_env_destroy(env);
+
+	return 0;
+}
+
+#if 0
+files 2012
+28, 2 (29 606 511)
+32, 0 (33 595 392)
+
+db jpg 28, 3 mb
+bind_snappy   29 707 821
+bind_bz2      29 707 817
+bind_lz4      29 707 838
+bind_xpress   29 707 838
+
+bind_no 1.143000
+bind_snappy 0.939000
+bind_bz2 0.975000
+bind_lz4 1.054000
+bind_lz4hc 1.015000
+bind_xpress 10.473000
+
+bind_no 1.480000
+bind_snappy 1.621000
+bind_bz2 1.082000
+bind_lz4 1.156000
+bind_lz4hc 1.112000
+bind_xpress 1.213000
+
+bind_no 1.541000
+bind_snappy 1.423000
+bind_bz2 1.182000
+bind_lz4 1.184000
+bind_lz4hc 1.179000
+bind_xpress 1.312000
+
+db raw                377.25  395 575 296
+bind_no 103.548000    377    (395 767 513)
+bind_snappy 80.026000 244    (256 241 457)
+bind_bz2 158.582000   193    (202 583 969)
+bind_lz4 72.128000    242    (254 198 131)
+bind_lz4hc 93.651000  250    (262 162 757)
+bind_xpress 69.994000 243    (255 514 141)
+
+bind_no 70.861000
+bind_snappy 66.621000
+bind_bz2 150.246000
+bind_lz4 70.260000
+bind_lz4hc 75.455000
+bind_xpress 39.903000
+#endif
+#endif
