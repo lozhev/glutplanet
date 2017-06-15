@@ -52,10 +52,8 @@ void print(const char* format, ...) {
 #elif __linux
 #include <pthread.h>
 #include <unistd.h>
-#define StartThread(start,arg) {\
-pthread_t th;\
-pthread_create(&th, 0, start, (void*)arg);\
-}
+#include <sys/syscall.h>
+#define StartThread(start,arg) { pthread_t th; pthread_create(&th, 0, start, (void*)arg); }
 typedef pthread_mutex_t mtx_t;
 #define mtx_init(m) pthread_mutex_init(m, 0)
 #define mtx_destroy(m) pthread_mutex_destroy(m)
@@ -559,15 +557,65 @@ Tile* tile_find(const Queue* q, Tile* tile) {
 	return 0;
 }
 
+void* deque_removedata_s(Queue* q, void* data) {
+	Node* cur;
+	void* ret;
+	mtx_lock(&q->mtx);
+	if((cur = q->first) == 0) {
+		mtx_unlock(&q->mtx);
+		return 0;
+	}
+	while(cur) {
+		if(cur->data == data) break;
+		cur = cur->next;
+	}
+	if(!cur) {
+		mtx_unlock(&q->mtx);
+		return 0;
+	}
+
+	// FIXME: if first == last
+	if(!cur->prev) {
+		q->first = cur->next;
+	} 
+	if(!cur->next) {
+		cur->prev->next = 0;
+		q->last = cur->prev;
+	} else {
+		cur->prev->next = cur->next;
+	}
+	if(cur->next == 0 && cur->prev == 0) {
+		q->first = 0;
+		q->last = 0;
+	}
+	ret = cur->data;
+	free(cur);
+	--q->count;
+	mtx_unlock(&q->mtx);
+	if(q->count == 0) {
+		print("tile_delete count %d\n", q->count);
+	}
+
+	return ret;
+}
+
 /*void tile_delete(Queue* q, Tile* tile) {
-	Node* cur = q->first;
+	Node* cur;
+	mtx_lock(&q->mtx);
+	if((cur = q->first) == 0) {
+		mtx_unlock(&q->mtx);
+		return;
+	}
 	while (cur) {
 		Tile* t = (Tile*)cur->data;
 		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) break;
 		cur = cur->next;
 	}
-	if(!cur) return;
-	//mtx_lock(&q->mtx);
+	if(!cur) {
+		mtx_unlock(&q->mtx);
+		return;
+	}
+
 	if(!cur->prev){
 		q->first = cur->next;
 	} if (!cur->next){
@@ -578,9 +626,8 @@ Tile* tile_find(const Queue* q, Tile* tile) {
 	}
 	free(cur);
 	--q->count;
-	//mtx_unlock(&q->mtx);
-	print("tiles_load %d\n",q->count);
-	//print_tile((Tile*)cur->data);
+	mtx_unlock(&q->mtx);
+	print("tile_delete count %d\n",q->count);
 
 	return;
 }*/
@@ -600,7 +647,7 @@ void tile_tofirst(Queue* q, Tile* tile) {
 
 	cur->prev->next = cur->next;
 	if(cur->next)
-		cur->next->prev = cur->prev;
+		cur->next->prev = cur->prev; // *** Program received signal SIGSEGV (Segmentation fault) ***
 	else
 		q->last = cur->prev;
 
@@ -715,8 +762,7 @@ Tile* tiles_draw[64];
 int tiles_draw_count = 0;
 
 int tile_release(Tile* t) {
-	--t->ref;
-	if(t->ref == 0) {
+	if(--t->ref == 0) {
 		array_push(tiles_release, t);
 		/*if(t->texdata) {
 			free(t->texdata);
@@ -837,8 +883,7 @@ void destroyMap(MapProvider* map) {
 }
 
 void mapprovider_getFileName(MapProvider* map,Tile* tile,char* filename) {
-	int n = sprintf(filename,"%s/%d/%d/%d.%s",map->name,tile->z,tile->x,tile->y,map->imgformat);
-	assert(n<64);
+	sprintf(filename,"%s/%d/%d/%d.%s",map->name,tile->z,tile->x,tile->y,map->imgformat);
 }
 
 void mapprovider_getUrlName(MapProvider* map,Tile* tile,char* url) {
@@ -846,8 +891,7 @@ void mapprovider_getUrlName(MapProvider* map,Tile* tile,char* url) {
 		map->makeurl(map,tile,url);
 	} else {
 		int r = rand()%4;
-		r = sprintf(url,map->urlformat,map->subdomians[r],tile->z,tile->x,tile->y,map->imgformat);
-		assert(r<128);
+		sprintf(url,map->urlformat,map->subdomians[r],tile->z,tile->x,tile->y,map->imgformat);
 	}
 }
 
@@ -862,10 +906,9 @@ stbi_uc* getImageData(Tile* tile) {
 	stbi_uc* data=0;
 	int w,h,comp;
 	mapprovider_getFileName(&map,tile,filename);
-	//if(exists(filename)) {
-	//	data = stbi_load(filename, &w, &h, &comp, 0);
-	//} else 
-	{
+	if(exists(filename)) {
+		data = stbi_load(filename, &w, &h, &comp, 0);
+	} else {
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
@@ -876,7 +919,6 @@ stbi_uc* getImageData(Tile* tile) {
 			//tmpnam(tmp);
 			strcpy(tmp,filename);
 			strcat(tmp,".tmp");
-			assert(strlen(tmp)<64);
 			stream=fopen(tmp, "wb");
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, stream);
@@ -898,9 +940,19 @@ stbi_uc* getImageData(Tile* tile) {
 
 void tiles_limit() {
 	if(tiles->count > 512) {// 4*6*18=432. 512 tiles ~100mb texures
-		Tile* t = deque_pop_back(tiles);
+		int n = tiles->count - 512;
+		while(--n) {
+			Tile* t = (Tile*)tiles->last->data;
+			if(t->z != 1) {
+				deque_pop_back(tiles);
+				tile_release(t);
+				t = deque_removedata_s(tiles_load, t);
+				if(t) tile_release(t);
+			}
+		}
+		/*Tile* t = deque_pop_back(tiles);
 		if(t->z == 1) deque_push_front(tiles, t); // keep top tiles
-		else tile_release(t);
+		else tile_release(t);*/
 	}
 	/*if(tiles_load->count > 512) {// free last from load safe??
 		Tile* t = deque_pop_back_s(tiles_load);
@@ -910,23 +962,23 @@ void tiles_limit() {
 }
 
 Tile* tile_new(int x, int y, int z){
-	char filename[64];
+//	char filename[64];
 	Tile* newtile = (Tile*)malloc(sizeof(Tile));
 	tile_init(newtile, x, y, z);
 	tile_make(newtile);
 
-	mapprovider_getFileName(&map,newtile,filename);
-	if(exists(filename)){
-		newtile->filename = strdup(filename);
-		array_push(tiles_loaded, newtile);
-	} else {
-		newtile->download = 1;
+	//mapprovider_getFileName(&map,newtile,filename);
+	//if(exists(filename)){
+	//	newtile->filename = strdup(filename);
+	//	array_push(tiles_loaded, newtile);
+	//} else {
+		//newtile->download = 1;
 		if (tile_tofirst_s(tiles_load,newtile) == 0){
 			deque_push_front_s(tiles_load, newtile);
 		} else {
 			print("new in load\n");
 		}
-	}
+	//}
 
 	newtile->ref+=1;
 	deque_push_front(tiles, newtile);
@@ -950,7 +1002,7 @@ void to_draw(int z, int x, int y) {
 		Tile* newtile = tile_new(x,y,z);
 		tiles_draw[tiles_draw_count++] = newtile;
 
-		tiles_limit();
+		//tiles_limit();
 
 		//tile_release(newtile);
 	} else {
@@ -1116,7 +1168,7 @@ void make_tiles() {
 			deque_push_front_s(tiles_load, newtile);*/
 			Tile* newtile = tile_new(t[j].x, t[j].y, t[j].z);
 
-			tiles_limit();
+			//tiles_limit();
 
 			//tile_release(newtile);
 		}
@@ -1346,12 +1398,27 @@ int tile_make_tex(Tile* t){
 static DWORD WINAPI worker_load(void* param){
 #elif __linux
 static void* worker_load(void* param){
+	//int fcall=1;
+	struct sched_param sp;
+	sp.sched_priority = 0;
+	pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
 #endif
-	mtx_t mtx;
-	void* data;
-	int n = (int)param;
+	//mtx_t mtx;
+	//void* data;
+	//size_t n = (size_t)param;
 	//mtx_init(&mtx);
 	while(1){
+/*#if __linux
+// from rocksdb
+		if (fcall){
+#define IOPRIO_CLASS_SHIFT (13)
+#define IOPRIO_PRIO_VALUE(class, data) (((class) << IOPRIO_CLASS_SHIFT) | data)
+			syscall(SYS_ioprio_set, 1,  // IOPRIO_WHO_PROCESS
+              0,                  // current thread
+              IOPRIO_PRIO_VALUE(3, 0));
+			fcall = 0;
+		}
+#endif*/
 		//print("%d wait\n",n);
 		Tile* t = queue_pop_wait(tiles_load);
 		/*Tile* t;
@@ -1360,6 +1427,7 @@ static void* worker_load(void* param){
 		//print("%d get\n",n);
 		mtx_lock(&tiles_load->mtx);
 		if (!tile_release(t)){
+			void* data;
 			t->ref += 1;
 			mtx_unlock(&tiles_load->mtx);
 			//print("%d load\n",n);
@@ -1404,12 +1472,11 @@ void Render(float f){
 		if(!tile_release(t)) { // clear unused tiles
 			tile_make_tex(t);
 			change = 1;
-			if(++i == 1) break; // load by 1 texture or 2 or 5..
+			if(++i == 2) break; // load by 1 texture or 2 or 5.. directly load only 1 with good cpu
 		} /*else {
 			print("tiles_loaded release\n");
 		}*/
 		t = array_pop(tiles_loaded);
-		change = 1;
 	}
 
 	if(change) {
@@ -1441,6 +1508,8 @@ void Render(float f){
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
 	
+	tiles_limit();
+
 	i = 0;
 	t = array_pop(tiles_release);
 	while(t) {
@@ -1454,7 +1523,7 @@ void Render(float f){
 			t->texdata = 0;
 		}
 		if(t->tex) {
-			glDeleteTextures(1, &t->tex);
+			glDeleteTextures(1, &t->tex); //*** Program received signal SIGSEGV (Segmentation fault) ***
 			t->tex = 0;
 		}
 		free(t);
@@ -1742,7 +1811,7 @@ int main(int argc, char* argv[]) {
 	mtx_init(&g_mtx);
 
 	i = 3;// num_cores();
-	while(i--) StartThread(worker_load,i);
+	while(i--) StartThread(worker_load,(size_t)i);
 	
 	make_tiles();
 #endif
@@ -1751,16 +1820,16 @@ int main(int argc, char* argv[]) {
 	for (;;){
 		glutMainLoopEvent();
 
-		if (a<1)
+		//if (a<1)
 		{
 			double zz,rx,ry;
 			a +=anim;
-			/*if(a > 1) { a = 1; anim = -anim; }
+			if(a > 1) { a = 1; anim = -anim; }
 			if(a < 0) { 
 				a = 0; anim = -anim; 
 
 				if(ip++ >= NUM_POINTS-1) ip = 0;
-			}*/
+			}
 			center.zoom = lerpd(startz, points[ip][2], a);
 			zz = pow(2,center.zoom);
 			rx = getxp(points[ip][0],zz);
@@ -2000,17 +2069,17 @@ int main(int argc,char** argv){
 /*
 765 files
 
-jpeg 12,8(13 451 144)
-     14,2(14 970 880)
+jpeg 12,8(13Â 451Â 144)
+     14,2(14Â 970Â 880)
 
-db jpg 12,8(13 485 244)
-       12,8(13 500 416)
+db jpg 12,8(13Â 485Â 244)
+       12,8(13Â 500Â 416)
 
-raw 143(150 405 120)
-    143(150 405 120)
+raw 143(150Â 405Â 120)
+    143(150Â 405Â 120)
 
-db  118(124 715 475)
-    118(124 751 872)
+db  118(124Â 715Â 475)
+    118(124Â 751Â 872)
 
 add 0.156000
 read file 4.766000
@@ -2029,8 +2098,8 @@ write file 6.531000
 write db 17.391000
 read db 2.282000
 
-write lz db 15.828000                  108(114 269 409)
-write lz db compressed 16.297000       108(114 204 293)
+write lz db 15.828000                  108(114Â 269Â 409)
+write lz db compressed 16.297000       108(114Â 204Â 293)
 write lz db 13.751000
 write lz db compressed 16.782000
 
@@ -2406,14 +2475,14 @@ int main(int argc, char* argv[]) {
 
 #if 0
 files 2012
-28, 2 (29 606 511)
-32, 0 (33 595 392)
+28, 2 (29Â 606Â 511)
+32, 0 (33Â 595Â 392)
 
 db jpg 28, 3 mb
-bind_snappy   29 707 821
-bind_bz2      29 707 817
-bind_lz4      29 707 838
-bind_xpress   29 707 838
+bind_snappy   29Â 707Â 821
+bind_bz2      29Â 707Â 817
+bind_lz4      29Â 707Â 838
+bind_xpress   29Â 707Â 838
 
 bind_no 1.143000
 bind_snappy 0.939000
@@ -2437,12 +2506,12 @@ bind_lz4hc 1.179000
 bind_xpress 1.312000
 
 db raw                377.25  395 575 296
-bind_no 103.548000    377    (395 767 513)
-bind_snappy 80.026000 244    (256 241 457)
-bind_bz2 158.582000   193    (202 583 969)
-bind_lz4 72.128000    242    (254 198 131)
-bind_lz4hc 93.651000  250    (262 162 757)
-bind_xpress 69.994000 243    (255 514 141)
+bind_no 103.548000    377    (395Â 767Â 513)
+bind_snappy 80.026000 244    (256Â 241Â 457)
+bind_bz2 158.582000   193    (202Â 583Â 969)
+bind_lz4 72.128000    242    (254Â 198Â 131)
+bind_lz4hc 93.651000  250    (262Â 162Â 757)
+bind_xpress 69.994000 243    (255Â 514Â 141)
 
 bind_no 70.861000
 bind_snappy 66.621000
