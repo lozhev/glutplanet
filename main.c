@@ -574,6 +574,8 @@ void* deque_removedata_s(Queue* q, void* data) {
 		return 0;
 	}
 
+	print("tile_delete prev %p cur %p next %p\n", cur->prev, cur, cur->next);
+
 	// FIXME: if first == last
 	if(!cur->prev) {
 		q->first = cur->next;
@@ -819,8 +821,7 @@ void getBindUrl(void* m,Tile* tile, char* url){
 		sprintf(d, "%d", digit); //itoa(digit, d, 10);
 		strcat(key,d);
 	}
-	i = sprintf(url,"http://%s.tiles.virtualearth.net/tiles/a%s.jpeg?g=123",map->subdomians[r],key);
-	assert(i<128);
+	sprintf(url,"http://%s.tiles.virtualearth.net/tiles/a%s.jpeg?g=123",map->subdomians[r],key);
 }
 void initBingMap(MapProvider* map) {
 	//zoom max 21
@@ -941,24 +942,33 @@ stbi_uc* getImageData(Tile* tile) {
 void tiles_limit() {
 	if(tiles->count > 512) {// 4*6*18=432. 512 tiles ~100mb texures
 		int n = tiles->count - 512;
-		while(--n) {
+		while(n--) {
 			Tile* t = (Tile*)tiles->last->data;
-			if(t->z != 1) {
+			//if(t->z != 1) { // todo: keet top
 				deque_pop_back(tiles);
 				tile_release(t);
-				t = deque_removedata_s(tiles_load, t);
-				if(t) tile_release(t);
-			}
+				//t = deque_removedata_s(tiles_load, t); // always last??
+				//if(t) tile_release(t);
+				mtx_lock(&tiles_load->mtx);
+				if (tiles_load->count == 0) { 
+					print("not must happen tiles_limit tiles_load->count == 0\n"); 
+					mtx_unlock(&tiles_load->mtx);
+					continue;
+				}
+				if (tiles_load->last->data == (char*)t){
+					deque_pop_back(tiles_load);
+					tile_release(t);
+				} else {
+					t = deque_removedata_s(tiles_load, t); // always last??
+					if(t) {
+						print("not must happen in tiles_limit\n");
+						tile_release(t);
+					}
+				}
+				mtx_unlock(&tiles_load->mtx);
+			//}
 		}
-		/*Tile* t = deque_pop_back(tiles);
-		if(t->z == 1) deque_push_front(tiles, t); // keep top tiles
-		else tile_release(t);*/
 	}
-	/*if(tiles_load->count > 512) {// free last from load safe??
-		Tile* t = deque_pop_back_s(tiles_load);
-		if(t->z == 1) deque_push_front_s(tiles_load, t); // keep top tiles
-		else tile_release(t);
-	}*/
 }
 
 Tile* tile_new(int x, int y, int z){
@@ -974,13 +984,13 @@ Tile* tile_new(int x, int y, int z){
 	//} else {
 		//newtile->download = 1;
 		if (tile_tofirst_s(tiles_load,newtile) == 0){
+			newtile->ref+=1;
 			deque_push_front_s(tiles_load, newtile);
 		} else {
 			print("new in load\n");
 		}
 	//}
 
-	newtile->ref+=1;
 	deque_push_front(tiles, newtile);
 	
 	return newtile;
@@ -989,26 +999,12 @@ Tile* tile_new(int x, int y, int z){
 void to_draw(int z, int x, int y) {
 	Tile tile = {z,x,y};
 	Tile* ret = tile_find(tiles, &tile);
-
 	if(ret == 0) {
-		/*Tile* newtile = (Tile*)malloc(sizeof(Tile));
-		tile_init(newtile, tile.x, tile.y, tile.z);
-		tile_make(newtile);
-
-		newtile->ref+=2;
-		deque_push_front(tiles, newtile);
-		deque_push_front_s(tiles_load, newtile);*/
-
 		Tile* newtile = tile_new(x,y,z);
 		tiles_draw[tiles_draw_count++] = newtile;
-
-		//tiles_limit();
-
-		//tile_release(newtile);
 	} else {
-		tile_tofirst_s(tiles_load,ret);
 		tile_tofirst(tiles,ret); // FIXME:!! second search
-		//ret->ref++;
+		tile_tofirst_s(tiles_load,ret);
 		tiles_draw[tiles_draw_count++] = ret;
 	}
 }
@@ -1145,7 +1141,7 @@ void make_tiles() {
 					}
 					if(!has) t[t_count++] = p;
 				} else {
-					tile_tofirst(tiles, c);
+					tile_tofirst(tiles, c); // FIXME:!! second search
 					tile_tofirst_s(tiles_load, c);
 				}
 				tile_parent(&p, &p);
@@ -1160,17 +1156,7 @@ void make_tiles() {
 		}*/
 
 		for(j = t_count-1; j >= 0; --j) {
-			/*Tile* newtile = (Tile*)malloc(sizeof(Tile));
-			tile_init(newtile, t[j].x, t[j].y, t[j].z);
-
-			newtile->ref += 2;
-			deque_push_front(tiles, newtile);
-			deque_push_front_s(tiles_load, newtile);*/
 			Tile* newtile = tile_new(t[j].x, t[j].y, t[j].z);
-
-			//tiles_limit();
-
-			//tile_release(newtile);
 		}
 
 		/*if(last_r_count != release_count) {
@@ -1398,39 +1384,15 @@ int tile_make_tex(Tile* t){
 static DWORD WINAPI worker_load(void* param){
 #elif __linux
 static void* worker_load(void* param){
-	//int fcall=1;
-	struct sched_param sp;
-	sp.sched_priority = 0;
-	pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
 #endif
-	//mtx_t mtx;
-	//void* data;
-	//size_t n = (size_t)param;
-	//mtx_init(&mtx);
+	size_t n = (size_t)param;
 	while(1){
-/*#if __linux
-// from rocksdb
-		if (fcall){
-#define IOPRIO_CLASS_SHIFT (13)
-#define IOPRIO_PRIO_VALUE(class, data) (((class) << IOPRIO_CLASS_SHIFT) | data)
-			syscall(SYS_ioprio_set, 1,  // IOPRIO_WHO_PROCESS
-              0,                  // current thread
-              IOPRIO_PRIO_VALUE(3, 0));
-			fcall = 0;
-		}
-#endif*/
-		//print("%d wait\n",n);
 		Tile* t = queue_pop_wait(tiles_load);
-		/*Tile* t;
-		cnd_wait(&tiles_load->cnd,&tiles_load->mtx);
-		t = queue_pop(tiles_load);*/
-		//print("%d get\n",n);
 		mtx_lock(&tiles_load->mtx);
 		if (!tile_release(t)){
 			void* data;
 			t->ref += 1;
 			mtx_unlock(&tiles_load->mtx);
-			//print("%d load\n",n);
 			data = getImageData(t);
 
 			mtx_lock(&tiles_load->mtx);
@@ -1439,35 +1401,44 @@ static void* worker_load(void* param){
 				print("release after load\n");
 				free(data);
 			} else {
-				//mtx_lock(&mtx);
+				int sl=0;
 				t->ref += 1;
 				t->texdata = data;
 				t->download = 0;
-				//queue_push(tiles_loaded, t);
 				array_push(tiles_loaded, t);
+				sl = tiles_loaded->count > 10;
 				mtx_unlock(&tiles_load->mtx);
-				//print("%d push\n",n);
+				while(sl){ // wait signal tiles_loaded->count > 10 without sleep??
+					Sleep(250);
+					mtx_lock(&tiles_load->mtx);
+					sl = tiles_loaded->count > 10;
+					mtx_unlock(&tiles_load->mtx);
+				}
 			}
 		} else {
-			//print("thread release\n");
+			print("thread release\n");
 			mtx_unlock(&tiles_load->mtx);
 		}
 	}
-	//mtx_destroy(&mtx);
 	return 0;
 }
 int change=0;
+//int load_max=0;
+//int loaded_max=0;
 void Render(float f){
 	int i=0,j=0;
 	GLuint ltex=-1;
 
 	Tile* t = array_pop(tiles_loaded);
-	while(t) {
-		if(t == tiles_loaded->end) {
-			print("tiles_loaded end\n");
-			t = array_pop(tiles_loaded);
-			continue;
-		}
+	/*if (tiles_load->count > load_max){
+		load_max = tiles_load->count;
+		print("load max %d\n",load_max);
+	}
+	if (tiles_loaded->count > loaded_max){
+		loaded_max = tiles_loaded->count;
+		print("loaded max %d\n",loaded_max);
+	}*/
+	while(t) { // todo while -> for
 		//print("release loaded %p %2d %2d %2d\n", t, t->z, t->x, t->y);
 		if(!tile_release(t)) { // clear unused tiles
 			tile_make_tex(t);
@@ -1510,9 +1481,10 @@ void Render(float f){
 	
 	tiles_limit();
 
-	i = 0;
-	t = array_pop(tiles_release);
-	while(t) {
+	glutSwapBuffers();
+
+	// release by 4 tiles
+	for(i=0; i<4 && (t = array_pop(tiles_release)) != 0; ++i){
 		//print("release        %p %2d %2d %2d\n", t, t->z, t->x, t->y);
 		if(t->filename) {
 			free(t->filename);
@@ -1522,13 +1494,11 @@ void Render(float f){
 			free(t->texdata);
 			t->texdata = 0;
 		}
-		if(t->tex) {
+		if(t->tex) {                      // todo release after glswap??
 			glDeleteTextures(1, &t->tex); //*** Program received signal SIGSEGV (Segmentation fault) ***
 			t->tex = 0;
 		}
 		free(t);
-		if(++i == 4) break;// release by 4 tiles
-		t = array_pop(tiles_release);
 	}
 }
 
@@ -1843,7 +1813,7 @@ int main(int argc, char* argv[]) {
 		}
 
 		Render(0);
-		glutSwapBuffers();
+		//glutSwapBuffers();
 	}
 
 	return 0;
