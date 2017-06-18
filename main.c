@@ -51,11 +51,18 @@ void print(const char* format, ...) {
 }
 #elif __linux
 #include <pthread.h>
+//#define __USE_MISC
 #include <unistd.h>
 #include <sys/syscall.h>
+#define Sleep(ms) usleep(ms)
 #define StartThread(start,arg) { pthread_t th; pthread_create(&th, 0, start, (void*)arg); }
 typedef pthread_mutex_t mtx_t;
-#define mtx_init(m) pthread_mutex_init(m, 0)
+#define mtx_init(m) {\
+pthread_mutexattr_t attr;\
+pthread_mutexattr_init(&attr);\
+pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_NORMAL);\
+pthread_mutex_init(m, &attr);\
+}
 #define mtx_destroy(m) pthread_mutex_destroy(m)
 #define mtx_lock(m) pthread_mutex_lock(m)
 #define mtx_unlock(m) pthread_mutex_unlock(m)
@@ -527,7 +534,7 @@ void array_push(Array* a, void* data) {
 		void** data;
 		a->cap += 128;
 		print("realloc: %3d %p count: %d\n", a->cap, a, a->count);
-		mtx_lock(&g_mtx);
+		//mtx_lock(&g_mtx);
 		//a->data = realloc(a->data, a->cap * sizeof(void*));
 		data = malloc(a->cap * sizeof(void*));
 		for(i = 0; i < a->count; ++i) {
@@ -536,7 +543,7 @@ void array_push(Array* a, void* data) {
 		}
 		free(a->data);
 		a->data = data;
-		mtx_unlock(&g_mtx);
+		//mtx_unlock(&g_mtx);
 	}
 	a->data[a->count++] = data;
 }
@@ -949,10 +956,11 @@ void tiles_limit() {
 				tile_release(t);
 				//t = deque_removedata_s(tiles_load, t); // always last??
 				//if(t) tile_release(t);
-				mtx_lock(&tiles_load->mtx);
-				if (tiles_load->count == 0) { 
-					print("not must happen tiles_limit tiles_load->count == 0\n"); 
-					mtx_unlock(&tiles_load->mtx);
+				//mtx_lock(&tiles_load->mtx);
+				if (tiles_load->count == 0) {
+					// it's happen
+					print("not must happen tiles_limit tiles_load->count == 0 n %d count %d\n",n, tiles->count);
+					//mtx_unlock(&tiles_load->mtx);
 					continue;
 				}
 				if (tiles_load->last->data == (char*)t){
@@ -965,7 +973,7 @@ void tiles_limit() {
 						tile_release(t);
 					}
 				}
-				mtx_unlock(&tiles_load->mtx);
+				//mtx_unlock(&tiles_load->mtx);
 			//}
 		}
 	}
@@ -1380,20 +1388,27 @@ int tile_make_tex(Tile* t){
 	vtx[14]= 1; vtx[15]= 1;
 	return 1;
 }
+double clck(){
+	return (double)clock() / CLOCKS_PER_SEC;
+}
 #if _WIN32
 static DWORD WINAPI worker_load(void* param){
 #elif __linux
 static void* worker_load(void* param){
 #endif
-	size_t n = (size_t)param;
+	//size_t n = (size_t)param;
 	while(1){
+		//double start = clck();
+		//print("get %d\n",n);
 		Tile* t = queue_pop_wait(tiles_load);
 		mtx_lock(&tiles_load->mtx);
 		if (!tile_release(t)){
 			void* data;
 			t->ref += 1;
 			mtx_unlock(&tiles_load->mtx);
+			//print("load    %d %.4f\n",n,clck() - start);
 			data = getImageData(t);
+			//print("load ok %d %.4f\n",n,clck() - start);
 
 			mtx_lock(&tiles_load->mtx);
 			if (tile_release(t)){
@@ -1428,6 +1443,7 @@ int change=0;
 void Render(float f){
 	int i=0,j=0;
 	GLuint ltex=-1;
+	//double start = clck();
 
 	Tile* t = array_pop(tiles_loaded);
 	/*if (tiles_load->count > load_max){
@@ -1443,7 +1459,8 @@ void Render(float f){
 		if(!tile_release(t)) { // clear unused tiles
 			tile_make_tex(t);
 			change = 1;
-			if(++i == 2) break; // load by 1 texture or 2 or 5.. directly load only 1 with good cpu
+			// slow load in MESA.. TODO: second context
+			if(++i == 1) break; // load by 1 texture or 2 or 5.. directly load only 1 with good cpu
 		} /*else {
 			print("tiles_loaded release\n");
 		}*/
@@ -1478,10 +1495,13 @@ void Render(float f){
 		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
-	
+
 	tiles_limit();
 
+	//print("swap %.4f\n",clck() - start);
+	//start = clck();
 	glutSwapBuffers();
+	//print("swap %.4f\n",clck() - start);
 
 	// release by 4 tiles
 	for(i=0; i<4 && (t = array_pop(tiles_release)) != 0; ++i){
@@ -1731,6 +1751,10 @@ void* array_pop2(Array2* a) {
 	if(a->count) return a->data[--a->count];
 	return 0;
 }
+
+typedef int (*PFNWGLSWAPINTERVALEXTPROC)(int interval);
+PFNWGLSWAPINTERVALEXTPROC glSwapInterval;
+
 int main(int argc, char* argv[]) {
 	int i,ip=0;
 	double z,startz,a=0,anim=0.004;
@@ -1746,6 +1770,10 @@ int main(int argc, char* argv[]) {
 	glutKeyboardFunc(keyboard);
 	glutReshapeFunc(reshape);
 	glutDisplayFunc(Draw_empty/*draw*/);
+#ifdef __linux
+	glSwapInterval = (PFNWGLSWAPINTERVALEXTPROC)glutGetProcAddress("glXSwapIntervalMESA");
+	glSwapInterval(1);
+#endif
 
 #if TEST_QUEUE
 	{int n;
