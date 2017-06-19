@@ -105,24 +105,6 @@ void tile_init(Tile* t,int x,int y,int z){
 	t->ref = 1;
 }
 
-/*int tile_release(Tile* t){
-	--t->ref;
-	if (t->ref==0){
-		if (t->texdata) {
-			free(t->texdata);
-			t->texdata=0;
-			//print("release texdata\n");
-		}
-		if(t->tex){
-			glDeleteTextures(1,&t->tex);
-			t->tex = 0;
-		}
-		free(t);
-		return 1;
-	}
-	return 0;
-}*/
-
 int cmp_tile(const void* l, const void* r) {
 	const Tile* lsh = (const Tile*)l;
 	const Tile* rsh = (const Tile*)r;
@@ -227,97 +209,8 @@ int crd_lt(crd_t* l, crd_t* r) {
 }
 
 
-// List
-typedef struct TileNode {
-	Tile* tile;
-	struct TileNode* next;
-	struct TileNode* prev;
-} TileNode;
-
-typedef struct TileList {
-	size_t count;
-	TileNode* first;
-	TileNode* last;
-} TileList;
-
-TileList* make_list() {
-	//return (TileList*)calloc(1,sizeof(TileList));
-	TileList* tl = (TileList*)malloc(sizeof(TileList));
-	tl->count = 0;
-	tl->first = 0;
-	tl->last = 0;
-	return tl;
-}
-
-void push_list(TileList* list,Tile* tile) {
-	TileNode* node = (TileNode*)malloc(sizeof(TileNode));
-	node->tile = tile;
-	node->next=0;
-	node->prev=0;
-	if (list->last==0) {
-		list->first = node;
-		list->last = node;
-	} else {
-		list->last->next = node;
-		node->prev = list->last;
-		list->last = node;
-	}
-	++list->count;
-}
-
-void pop_tile(TileList* list) {
-	TileNode* node = list->first;
-	Tile* tile = node->tile;
-	list->first = node->next;
-	glBindTexture(GL_TEXTURE_2D, 0);
-	glDisable(GL_TEXTURE_2D);
-	glDeleteTextures(1,&tile->tex);
-	free(tile);
-	free(node);
-	--list->count;
-}
-
-Tile* find_tile(const TileList* list, Tile* tile) {
-	const TileNode* cur = list->first;
-	Tile* t;
-	while (cur) {
-		//if (tile_cmp(cur->tile,tile)==0) return cur->tile;
-		t = cur->tile;
-		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) return t;
-		cur = cur->next;
-	}
-	return 0;
-}
-
-void clear_list(const TileList* list) {
-	const TileNode* n = list->first;
-	while (n) {
-		glDeleteTextures(1,&n->tile->tex);
-		free(n->tile);
-		n = n->next;
-	}
-}
-
-void destroy_list(TileList* list) {
-	TileNode* cur = list->first;
-	while (cur) {
-		if (cur->prev) free(cur->prev);
-		cur = cur->next;
-	}
-	free(list->last);
-	free(list);
-}
-
 void print_tile(Tile* item) {
 	print("Tile: %p z: %d x: %d y: %d\n",item,item->z,item->x,item->y);
-}
-
-void print_list(TileList* list) {
-	TileNode* cur = list->first;
-	while (cur) {
-		print_tile(cur->tile);
-		cur = cur->next;
-	}
 }
 
 int clamp(int n, int lower, int upper) {
@@ -607,39 +500,6 @@ void* deque_removedata_s(Queue* q, void* data) {
 
 	return ret;
 }
-
-/*void tile_delete(Queue* q, Tile* tile) {
-	Node* cur;
-	mtx_lock(&q->mtx);
-	if((cur = q->first) == 0) {
-		mtx_unlock(&q->mtx);
-		return;
-	}
-	while (cur) {
-		Tile* t = (Tile*)cur->data;
-		if (t->z==tile->z&&t->x==tile->x&&t->y==tile->y) break;
-		cur = cur->next;
-	}
-	if(!cur) {
-		mtx_unlock(&q->mtx);
-		return;
-	}
-
-	if(!cur->prev){
-		q->first = cur->next;
-	} if (!cur->next){
-		cur->prev->next = 0;
-		q->last = cur->prev;
-	} else {
-		cur->prev->next = cur->next;
-	}
-	free(cur);
-	--q->count;
-	mtx_unlock(&q->mtx);
-	print("tile_delete count %d\n",q->count);
-
-	return;
-}*/
 
 void tile_tofirst(Queue* q, Tile* tile) {
 	Node* cur;// = q->first;
@@ -959,7 +819,7 @@ void tiles_limit() {
 				//mtx_lock(&tiles_load->mtx);
 				if (tiles_load->count == 0) {
 					// it's happen
-					print("not must happen tiles_limit tiles_load->count == 0 n %d count %d\n",n, tiles->count);
+					//print("not must happen tiles_limit tiles_load->count == 0 n %d count %d\n",n, tiles->count);
 					//mtx_unlock(&tiles_load->mtx);
 					continue;
 				}
@@ -969,7 +829,7 @@ void tiles_limit() {
 				} else {
 					t = deque_removedata_s(tiles_load, t); // always last??
 					if(t) {
-						print("not must happen in tiles_limit\n");
+						//print("not must happen in tiles_limit\n");
 						tile_release(t);
 					}
 				}
@@ -995,7 +855,7 @@ Tile* tile_new(int x, int y, int z){
 			newtile->ref+=1;
 			deque_push_front_s(tiles_load, newtile);
 		} else {
-			print("new in load\n");
+			//print("new in load\n");
 		}
 	//}
 
@@ -1158,19 +1018,9 @@ void make_tiles() {
 		}
 		qsort(t,t_count,sizeof(Tile),cmp_tile);
 
-		/*if(last_t_count != t_count) {
-			print("last_t_count: %d\n", last_t_count);
-			last_t_count = t_count;
-		}*/
-
 		for(j = t_count-1; j >= 0; --j) {
 			Tile* newtile = tile_new(t[j].x, t[j].y, t[j].z);
 		}
-
-		/*if(last_r_count != release_count) {
-			print("last_r_count: %d\n", release_count);
-			last_r_count = release_count;
-		}*/
 	}
 }
 
@@ -1438,22 +1288,11 @@ static void* worker_load(void* param){
 	return 0;
 }
 int change=0;
-//int load_max=0;
-//int loaded_max=0;
 void Render(float f){
 	int i=0,j=0;
 	GLuint ltex=-1;
-	//double start = clck();
-
+	
 	Tile* t = array_pop(tiles_loaded);
-	/*if (tiles_load->count > load_max){
-		load_max = tiles_load->count;
-		print("load max %d\n",load_max);
-	}
-	if (tiles_loaded->count > loaded_max){
-		loaded_max = tiles_loaded->count;
-		print("loaded max %d\n",loaded_max);
-	}*/
 	while(t) { // todo while -> for
 		//print("release loaded %p %2d %2d %2d\n", t, t->z, t->x, t->y);
 		if(!tile_release(t)) { // clear unused tiles
@@ -1498,10 +1337,7 @@ void Render(float f){
 
 	tiles_limit();
 
-	//print("swap %.4f\n",clck() - start);
-	//start = clck();
 	glutSwapBuffers();
-	//print("swap %.4f\n",clck() - start);
 
 	// release by 4 tiles
 	for(i=0; i<4 && (t = array_pop(tiles_release)) != 0; ++i){
@@ -1514,8 +1350,8 @@ void Render(float f){
 			free(t->texdata);
 			t->texdata = 0;
 		}
-		if(t->tex) {                      // todo release after glswap??
-			glDeleteTextures(1, &t->tex); //*** Program received signal SIGSEGV (Segmentation fault) ***
+		if(t->tex) {
+			glDeleteTextures(1, &t->tex);
 			t->tex = 0;
 		}
 		free(t);
@@ -1752,9 +1588,6 @@ void* array_pop2(Array2* a) {
 	return 0;
 }
 
-typedef int (*PFNWGLSWAPINTERVALEXTPROC)(int interval);
-PFNWGLSWAPINTERVALEXTPROC glSwapInterval;
-
 int main(int argc, char* argv[]) {
 	int i,ip=0;
 	double z,startz,a=0,anim=0.004;
@@ -1770,22 +1603,7 @@ int main(int argc, char* argv[]) {
 	glutKeyboardFunc(keyboard);
 	glutReshapeFunc(reshape);
 	glutDisplayFunc(Draw_empty/*draw*/);
-#ifdef __linux
-	glSwapInterval = (PFNWGLSWAPINTERVALEXTPROC)glutGetProcAddress("glXSwapIntervalMESA");
-	glSwapInterval(1);
-#endif
 
-#if TEST_QUEUE
-	{int n;
-	queue_init(&path_list);
-	queue_init(&tex_list);
-
-	//CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)worker_path, "d:/libs/", 0, NULL);
-	_beginthread(worker_path,0,"d:/libs/");
-	n = num_cores();
-	for (;n;n--)
-		_beginthread(worker_load,0,0);}
-#else
 	curl_global_init(CURL_GLOBAL_WIN32);
 
 	//initMqcdnMap(&map);
@@ -1812,14 +1630,13 @@ int main(int argc, char* argv[]) {
 	while(i--) StartThread(worker_load,(size_t)i);
 	
 	make_tiles();
-#endif
 
 	z = startz;
 	for (;;){
 		glutMainLoopEvent();
 
 		//if (a<1)
-		{
+		/*{
 			double zz,rx,ry;
 			a +=anim;
 			if(a > 1) { a = 1; anim = -anim; }
@@ -1838,7 +1655,7 @@ int main(int argc, char* argv[]) {
 
 			make_tiles();
 			updateQuads();
-		}
+		}*/
 
 		Render(0);
 		//glutSwapBuffers();
