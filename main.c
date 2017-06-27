@@ -732,10 +732,10 @@ void initYndexMap(MapProvider* map) {
 	map->makeurl = 0;
 
 	sprintf(map->name,"yandex");
-	sprintf(map->subdomians[0],"0");
-	sprintf(map->subdomians[1],"1");
-	sprintf(map->subdomians[2],"2");
-	sprintf(map->subdomians[3],"3");
+	sprintf(map->subdomians[0],"1");
+	sprintf(map->subdomians[1],"2");
+	sprintf(map->subdomians[2],"3");
+	sprintf(map->subdomians[3],"4");
 	//http://vec04.maps.yandex.net/tiles?l=map&v=2.16.0&x=9&y=6&z=4
 	sprintf(map->urlformat,"http://vec0%%s.maps.yandex.net/tiles?l=map&v=2.26.0&z=%%d&x=%%d&y=%%d");
 	sprintf(map->imgformat,"png");
@@ -1647,7 +1647,7 @@ int main(int argc, char* argv[]) {
 
 	curl_global_init(CURL_GLOBAL_WIN32);
 
-	//initMqcdnMap(&map);
+	//initMqcdnMap(&map);  //not work
 	//initOSMMap(&map);
 	initBingMap(&map);
 	//initYahooMap(&map);  //not work
@@ -1680,7 +1680,7 @@ int main(int argc, char* argv[]) {
 	tiles_load = make_queue();
 	tiles_loaded = make_array(64);
 	tiles_release = make_array(64);
-	tiles_blend = make_array(64);
+	//tiles_blend = make_array(64);
 	mtx_init(&g_mtx);
 
 	i = 3;// num_cores();
