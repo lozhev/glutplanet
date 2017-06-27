@@ -88,7 +88,7 @@ typedef struct Tile {
 	GLuint ptex;      // parent texture
 	stbi_uc* texdata; // image
 	float vtx[16];    // vertices
-	int download;     // download
+	float blend;
 	char* filename;
 	volatile int ref; // has effect volatile??
 } Tile;
@@ -100,7 +100,7 @@ void tile_init(Tile* t,int x,int y,int z){
 	t->tex = 0;
 	t->ptex = 0;
 	t->texdata = 0;
-	t->download = 0;
+	t->blend = 0;
 	t->filename = 0;
 	t->ref = 1;
 }
@@ -151,6 +151,14 @@ double _maxd(double a,double b) {
 
 #define mind(a,b) (a<b?a:b)
 #define maxd(a,b) (a>b?a:b)
+
+double lerpd(double a, double b, double t) {
+	return a + t*(b - a);
+}
+
+float lerpf(float a, float b, float t) {
+	return a + t*(b - a);
+}
 
 
 // Coordinate
@@ -623,12 +631,14 @@ int veiwport[2]= {800,600};
 
 Queue* tiles;
 Queue* tiles_load;
-//Queue* tiles_loaded;
 Array* tiles_loaded;
-//Queue* tiles_release;
 Array* tiles_release;
+Array* tiles_blend;
 Tile* tiles_draw[64];
 int tiles_draw_count = 0;
+float texcoord[8];
+
+MapProvider map;
 
 int tile_release(Tile* t) {
 	if(--t->ref == 0) {
@@ -647,8 +657,6 @@ int tile_release(Tile* t) {
 	}
 	return 0;
 }
-
-MapProvider map;
 
 void initMqcdnMap(MapProvider* map) {
 	map->makeurl=0;
@@ -1031,24 +1039,48 @@ void do_exit(void){
 	//destroyMap(&map);
 }
 
-const char vert_src[]=
-"attribute vec4 a_pos;"
+static const char vert_src[]=
+"attribute vec2 a_pos;"
+"attribute vec2 a_tex;"
 "uniform mat4 u_proj;"
 "varying vec2 v_tex;"
 "void main(){"
 "	gl_Position = u_proj * vec4(a_pos.xy, 0, 1);"
-"	v_tex = a_pos.zw;"
+"	v_tex = a_tex;"
 "}";
 
-const char frag_src[]=
+static const char frag_src[]=
 "uniform sampler2D u_tex;"
 "varying vec2 v_tex;"
 "void main(){"
 "	gl_FragColor = texture2D(u_tex, v_tex);"
 "}";
 
+static const char vert_alpha_src[]=
+"attribute vec4 a_pos;"
+"attribute vec2 a_tex2;"
+"uniform mat4 u_proj;"
+"varying vec2 v_tex;"
+"varying vec2 v_tex2;"
+"void main(){"
+"	gl_Position = u_proj * vec4(a_pos.xy, 0, 1);"
+"	v_tex = a_pos.zw;"
+"	v_tex2 = a_tex2;"
+"}";
+
+static const char frag_alpha_src[]=
+"uniform float u_alpha;"
+"uniform sampler2D u_tex;"
+"uniform sampler2D u_tex2;"
+"varying vec2 v_tex;"
+"varying vec2 v_tex2;"
+"void main(){"
+"	gl_FragColor = (u_alpha) * texture2D(u_tex, v_tex) + (1.0-u_alpha) * texture2D(u_tex2, v_tex2);"
+"}";
+
 GLuint creatProg(const char* vert_src, const char* frag_src) {
 	GLuint prog, vert_id, frag_id;
+	//int len; char log[1000];
 
 	vert_id = glCreateShader(GL_VERTEX_SHADER);
 	glShaderSource(vert_id, 1, &vert_src, 0);
@@ -1062,6 +1094,7 @@ GLuint creatProg(const char* vert_src, const char* frag_src) {
 	glAttachShader(prog, vert_id);
 	glAttachShader(prog, frag_id);
 	glLinkProgram(prog);
+	//glGetProgramInfoLog(prog,1000,&len,log); if (len) print("creatProg:\n %s",log);
 
 	glDeleteShader(vert_id);
 	glDeleteShader(frag_id);
@@ -1084,12 +1117,7 @@ int tile_make(Tile* t){
 	vtx[8] = tx + ts; vtx[9] = ty;
 	vtx[12]= tx + ts; vtx[13]= ty + ts;
 
-	if(t->tex) {
-		vtx[2] = 0; vtx[3] = 0;
-		vtx[6] = 0; vtx[7] = 1;
-		vtx[10]= 1; vtx[11]= 0;
-		vtx[14]= 1; vtx[15]= 1;
-	} else {
+	{
 		int found = 0;
 		float tz = .5f;
 		int xoff = 0, yoff = 0;
@@ -1141,6 +1169,12 @@ void updateQuads() {
 GLuint prog;
 GLuint u_proj;
 
+GLuint prog_alpha;
+GLuint u_alpha;
+GLuint u_tex;
+GLuint u_tex2;
+GLuint u_proj_alpha;
+
 void createOrthographicOffCenter(float left, float right, float bottom, float top,
 								 float zNearPlane, float zFarPlane, float* dst) {
 	int i;
@@ -1161,12 +1195,15 @@ void reshape(int w, int h) {
 		createOrthographicOffCenter(-w/2.f, w/2.f, h/2.f, -h/2.f, -1, 1, m);
 		glUseProgram(prog);
 		glUniformMatrix4fv(u_proj, 1, GL_FALSE, m);
+		glUseProgram(prog_alpha);
+		glUniformMatrix4fv(u_proj_alpha, 1, GL_FALSE, m);
 	}
 }
 
 int moffsetx=0;
 int moffsety=0;
 int lastzoom=-1;
+float sm_zoom,t_zoom;
 void mouse(int button, int state, int x, int y) {
 	if (state == GLUT_DOWN) {
 		moffsetx = x;
@@ -1174,25 +1211,11 @@ void mouse(int button, int state, int x, int y) {
 	}
 
 	if (button == 3) {
-		// zoom:=12 for all earth??
-		int zoom = (int)floor(center.zoom+0.5);
-		crd_zoomby(&center,0.05);
-		if(lastzoom!=zoom){
-			lastzoom = zoom;
-			//make_tiles();
-		}
-		make_tiles();
-		updateQuads();
+		t_zoom += 0.1f;
+		sm_zoom = (t_zoom - (float)center.zoom)*0.1f;
 	} else if (button == 4) {
-		int zoom = (int)floor(center.zoom+0.5);
-		crd_zoomby(&center,-0.05);
-		if(lastzoom!=zoom){
-			lastzoom = zoom;
-			//fprintf(stderr,"zoom:%d\n",lastzoom);
-			//make_tiles();
-		}
-		make_tiles();
-		updateQuads();
+		t_zoom -= 0.1f;
+		sm_zoom = (t_zoom - (float)center.zoom)*0.1f;
 	}
 }
 
@@ -1232,14 +1255,16 @@ int tile_make_tex(Tile* t){
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
 	t->tex = textureId;
-	vtx[2] = 0; vtx[3] = 0;
+	//array_push(tiles_blend,t);
+	/*vtx[2] = 0; vtx[3] = 0;
 	vtx[6] = 0; vtx[7] = 1;
 	vtx[10]= 1; vtx[11]= 0;
-	vtx[14]= 1; vtx[15]= 1;
+	vtx[14]= 1; vtx[15]= 1;*/
+	t->blend = 1.f;
 	return 1;
 }
-double clck(){
-	return (double)clock() / CLOCKS_PER_SEC;
+float clck(){
+	return (float)clock();// / CLOCKS_PER_SEC;
 }
 #if _WIN32
 static DWORD WINAPI worker_load(void* param){
@@ -1269,7 +1294,7 @@ static void* worker_load(void* param){
 				int sl=0;
 				t->ref += 1;
 				t->texdata = data;
-				t->download = 0;
+//				t->download = 0;
 				array_push(tiles_loaded, t);
 				sl = tiles_loaded->count > 10;
 				mtx_unlock(&tiles_load->mtx);
@@ -1288,6 +1313,7 @@ static void* worker_load(void* param){
 	return 0;
 }
 int change=0;
+
 void Render(float f){
 	int i=0,j=0;
 	GLuint ltex=-1;
@@ -1300,10 +1326,14 @@ void Render(float f){
 			change = 1;
 			// slow load in MESA.. TODO: second context
 			if(++i == 1) break; // load by 1 texture or 2 or 5.. directly load only 1 with good cpu
-		} /*else {
-			print("tiles_loaded release\n");
-		}*/
+		} 
 		t = array_pop(tiles_loaded);
+	}
+
+	if(fabsf(center.zoom - t_zoom)>0.001){
+		//print("f: %f zoom: %f center z: %f\n",f,t_zoom,center.zoom);
+		crd_zoomto(&center,center.zoom+sm_zoom);
+		change = 1;
 	}
 
 	if(change) {
@@ -1317,23 +1347,64 @@ void Render(float f){
 
 	glEnable(GL_TEXTURE_2D);
 	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
 
+	
+	glActiveTexture(GL_TEXTURE0);
 	for (i=0; i<tiles_draw_count; ++i) {
 		Tile* t = tiles_draw[i];
+		if (t->blend > 0 && t->tex) {
+			glUseProgram(prog_alpha);
+			glUniform1f(u_alpha,t->blend);
 
-		if (t->tex){
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D,t->ptex);
+			glActiveTexture(GL_TEXTURE1);
 			glBindTexture(GL_TEXTURE_2D,t->tex);
-			ltex = t->tex;
+
+			glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
+			glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,0,texcoord);
+
+			t->blend-=0.0625f;
+			if(t->blend<=0.f) t->blend = 0.f;
 		} else {
-			if (ltex != t->ptex){
+			glUseProgram(prog);
+			glActiveTexture(GL_TEXTURE0);
+			glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,16,t->vtx);
+			if (t->tex){
+				glBindTexture(GL_TEXTURE_2D,t->tex);
+				glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,0,texcoord);
+			} else {
 				glBindTexture(GL_TEXTURE_2D,t->ptex);
-				ltex = t->ptex;
+				glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,16,&t->vtx[2]);
 			}
 		}
-
-		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
+		
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
+
+	/*glUseProgram(prog_alpha);
+	for (i=0; i<tiles_blend->count; ++i) {
+		Tile* t = (Tile*)tiles_blend->data[i];
+
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D,t->ptex);
+		glUniform1i(u_tex,0);
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D,t->tex);
+		glUniform1i(u_tex2,1);
+		glUniform1f(u_alpha,t->blend);
+		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
+		glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,0,texcoord);
+		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+
+		t->blend-=0.01f;
+		if(t->blend<=0){
+			t->blend = 0.f;
+			tiles_blend->data[i] = tiles_blend->data[--tiles_blend->count];
+			--i;
+		}
+	}*/
 
 	tiles_limit();
 
@@ -1555,42 +1626,12 @@ int num_cores(){
 #endif
 } 
 
-double lerpd(double a, double b, double t) {
-	return a + t*(b - a);
-}
-
-
-typedef struct {
-	char** data;
-	int count;
-	int cap;
-}Array2;
-
-Array2* make_array2(int count) {
-	Array2* a = (Array2*)malloc(sizeof(Array2));
-	a->data = malloc(count * sizeof(void*));
-	a->count = 0;
-	a->cap = count;
-	return a;
-}
-
-void array_push2(Array2* a, void* data) {
-	if(a->count++ >= a->cap) {
-		a->cap += 20;
-		print("realloc: %d\n", a->cap);
-		a->data = realloc(a->data, a->cap * sizeof(void*));
-	}
-	a->data[a->count - 1] = data;
-}
-
-void* array_pop2(Array2* a) {
-	if(a->count) return a->data[--a->count];
-	return 0;
-}
-
+//////////////////////////////////////////////////////////////////////////
+// main
 int main(int argc, char* argv[]) {
 	int i,ip=0;
 	double z,startz,a=0,anim=0.004;
+	float time_start=0.f,time_last=0.f;
 	crd_t crd;
 	time_t tm;
 	srand((unsigned int)time(&tm));
@@ -1614,16 +1655,32 @@ int main(int argc, char* argv[]) {
 	gladLoadGL();
 	prog = creatProg(vert_src,frag_src);
 	u_proj = glGetUniformLocation(prog, "u_proj");
+	prog_alpha = creatProg(vert_alpha_src,frag_alpha_src);
+	u_alpha = glGetUniformLocation(prog_alpha, "u_alpha");
+	u_tex = glGetUniformLocation(prog_alpha, "u_tex");
+	u_tex2 = glGetUniformLocation(prog_alpha, "u_tex2");
+	u_proj_alpha = glGetUniformLocation(prog_alpha, "u_proj");
+
+	glUseProgram(prog_alpha);
+	glUniform1i(u_tex,0);
+	glUniform1i(u_tex2,1);
+
+	texcoord[0]=0; texcoord[1]=0;
+	texcoord[2]=0; texcoord[3]=1;
+	texcoord[4]=1; texcoord[5]=0;
+	texcoord[6]=1; texcoord[7]=1;
 	crd_setz(&center,0.5,0.5,0);
 	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
 	lastzoom = (int)floor(center.zoom+0.5);
 	startz = center.zoom;
+	t_zoom = (float)center.zoom;
 	crd = fromPointToLatLng(center, startz);
 
 	tiles = make_queue();
 	tiles_load = make_queue();
 	tiles_loaded = make_array(64);
 	tiles_release = make_array(64);
+	tiles_blend = make_array(64);
 	mtx_init(&g_mtx);
 
 	i = 3;// num_cores();
@@ -1632,7 +1689,9 @@ int main(int argc, char* argv[]) {
 	make_tiles();
 
 	z = startz;
+	time_last = clck();
 	for (;;){
+		time_start = clck();
 		glutMainLoopEvent();
 
 		//if (a<1)
@@ -1657,7 +1716,8 @@ int main(int argc, char* argv[]) {
 			updateQuads();
 		}*/
 
-		Render(0);
+		Render(time_start - time_last);
+		time_last = time_start;
 		//glutSwapBuffers();
 	}
 
@@ -2290,10 +2350,10 @@ int main(int argc, char* argv[]) {
 
 #if 0
 files 2012
-28, 2 (29 606 511)
-32, 0 (33 595 392)
+28,2 (29 606 511)
+32,0 (33 595 392)
 
-db jpg 28, 3 mb
+db jpg 28,3 mb
 bind_snappy   29 707 821
 bind_bz2      29 707 817
 bind_lz4      29 707 838
