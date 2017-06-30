@@ -1647,9 +1647,18 @@ int main(int argc, char* argv[]) {
 
 	curl_global_init(CURL_GLOBAL_WIN32);
 
+	if(argc>1){
+		if (strcmp(argv[1],"-o")==0) initOSMMap(&map);
+		else if (strcmp(argv[1],"-y")==0) initYndexMap(&map);
+		else if (strcmp(argv[1],"-b")==0) initBingMap(&map);
+		else initBingMap(&map);
+	} else {
+		initBingMap(&map);
+	}
+
 	//initMqcdnMap(&map);  //not work
 	//initOSMMap(&map);
-	initBingMap(&map);
+	//initBingMap(&map);
 	//initYahooMap(&map);  //not work
 	//initYndexMap(&map);
 	gladLoadGL();
