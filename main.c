@@ -1,7 +1,10 @@
 #include "glad/glad.h"
-//#include <GL/freeglut_std.h>
 //#include <GL/freeglut_ext.h> // glutMainLoopEvent
+#ifdef __APPLE__
 #include <GLUT/GLUT.h>
+#else
+#include <GL/glut.h>
+#endif
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdio.h>
@@ -52,7 +55,6 @@ void print(const char* format, ...) {
 }
 #elif __linux || __APPLE__
 #include <pthread.h>
-//#define __USE_MISC
 #include <unistd.h>
 #include <sys/syscall.h>
 #define Sleep(ms) usleep(ms)

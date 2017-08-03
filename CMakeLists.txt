@@ -7,22 +7,19 @@ include_directories(
 )
 
 if(APPLE)
-    find_package(OpenGL REQUIRED)
     find_package(GLUT REQUIRED)
-    #set(GL_LIBS ${OPENGL_LIBRARIES} ${GLUT_LIBRARIES})
     set(GL_LIBS ${GLUT_LIBRARIES})
-    include_directories(${OPENGL_INCLUDE_DIR} ${OPENGL_INCLUDE_DIR})
+    include_directories(${OPENGL_INCLUDE_DIR})
 else(APPLE)
-    set(GL_LIBS "gl" "glut")
+    set(GL_LIBS "glut")
 endif(APPLE)
-message(${GL_LIBS})
 
 link_libraries (
-	${GL_LIBS}
-	m
-	curl
-	pthread
-	dl
+    ${GL_LIBS}
+    m
+    curl
+    pthread
+    dl
 )
 
 add_executable(glutplanet main.c glad.c)
