@@ -1,6 +1,7 @@
 #include "glad/glad.h"
-#include <GL/freeglut_std.h>
-#include <GL/freeglut_ext.h> // glutMainLoopEvent
+//#include <GL/freeglut_std.h>
+//#include <GL/freeglut_ext.h> // glutMainLoopEvent
+#include <GLUT/GLUT.h>
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdio.h>
@@ -49,7 +50,7 @@ void print(const char* format, ...) {
 	va_end(argptr);
 	OutputDebugStringA(buf);
 }
-#elif __linux
+#elif __linux || __APPLE__
 #include <pthread.h>
 //#define __USE_MISC
 #include <unistd.h>
@@ -1027,7 +1028,7 @@ void make_tiles() {
 		qsort(t,t_count,sizeof(Tile),cmp_tile);
 
 		for(j = t_count-1; j >= 0; --j) {
-			Tile* newtile = tile_new(t[j].x, t[j].y, t[j].z);
+			/*Tile* newtile = */tile_new(t[j].x, t[j].y, t[j].z);
 		}
 	}
 }
@@ -1233,7 +1234,7 @@ void mousemove(int x,int y) {
 
 int tile_make_tex(Tile* t){
 	GLuint textureId;
-	float* vtx = t->vtx;
+	//float* vtx = t->vtx;
 	glGenTextures(1, &textureId);
 	glBindTexture(GL_TEXTURE_2D, textureId);
 	if (t->filename){
@@ -1268,7 +1269,7 @@ float clck(){
 }
 #if _WIN32
 static DWORD WINAPI worker_load(void* param){
-#elif __linux
+#elif __linux || __APPLE__
 static void* worker_load(void* param){
 #endif
 	//size_t n = (size_t)param;
@@ -1315,8 +1316,8 @@ static void* worker_load(void* param){
 int change=0;
 
 void Render(float f){
-	int i=0,j=0;
-	GLuint ltex=-1;
+    int i=0;//,j=0;
+	//GLuint ltex=-1;
 	
 	Tile* t = array_pop(tiles_loaded);
 	while(t) { // todo while -> for
@@ -1326,11 +1327,11 @@ void Render(float f){
 			change = 1;
 			// slow load in MESA.. TODO: second context
 			if(++i == 1) break; // load by 1 texture or 2 or 5.. directly load only 1 with good cpu
-		} 
+		}
 		t = array_pop(tiles_loaded);
 	}
 
-	if(fabsf(center.zoom - t_zoom)>0.001){
+	if(fabs(center.zoom - t_zoom)>0.001){
 		//print("f: %f zoom: %f center z: %f\n",f,t_zoom,center.zoom);
 		crd_zoomto(&center,center.zoom+sm_zoom);
 		change = 1;
@@ -1429,7 +1430,10 @@ void Render(float f){
 	}
 }
 
-void Draw_empty(void){}
+void Draw_empty(void){
+    Render(0);
+    glutPostRedisplay();
+}
 
 /*double p[][2]={
 	{-165.0,60.0},
@@ -1619,7 +1623,7 @@ int num_cores(){
 	SYSTEM_INFO sysinfo;
 	GetSystemInfo(&sysinfo);
 	return sysinfo.dwNumberOfProcessors;
-#elif __linux
+#elif __linux || __APPLE__
 	return sysconf(_SC_NPROCESSORS_ONLN);
 #else
 #error "platform error"
@@ -1629,9 +1633,9 @@ int num_cores(){
 //////////////////////////////////////////////////////////////////////////
 // main
 int main(int argc, char* argv[]) {
-	int i,ip=0;
-	double z,startz,a=0,anim=0.004;
-	float time_start=0.f,time_last=0.f;
+    int i;//,ip=0;
+	//double z,startz,a=0,anim=0.004;
+	//float time_start=0.f,time_last=0.f;
 	crd_t crd;
 	time_t tm;
 	srand((unsigned int)time(&tm));
@@ -1681,9 +1685,9 @@ int main(int argc, char* argv[]) {
 	crd_setz(&center,0.5,0.5,0);
 	crd_zoomto(&center,log2(veiwport[0]<veiwport[1]?veiwport[0]:veiwport[1] / 256.0));
 	lastzoom = (int)floor(center.zoom+0.5);
-	startz = center.zoom;
+	//startz = center.zoom;
 	t_zoom = (float)center.zoom;
-	crd = fromPointToLatLng(center, startz);
+	crd = fromPointToLatLng(center, center.zoom/*startz*/);
 
 	tiles = make_queue();
 	tiles_load = make_queue();
@@ -1696,15 +1700,17 @@ int main(int argc, char* argv[]) {
 	while(i--) StartThread(worker_load,(size_t)i);
 	
 	make_tiles();
+    
+    glutMainLoop();
 
-	z = startz;
+	/*z = startz;
 	time_last = clck();
 	for (;;){
 		time_start = clck();
 		glutMainLoopEvent();
 
 		//if (a<1)
-		/*{
+		/ *{
 			double zz,rx,ry;
 			a +=anim;
 			if(a > 1) { a = 1; anim = -anim; }
@@ -1723,12 +1729,12 @@ int main(int argc, char* argv[]) {
 
 			make_tiles();
 			updateQuads();
-		}*/
+		}* /
 
 		Render(time_start - time_last);
 		time_last = time_start;
 		//glutSwapBuffers();
-	}
+	}*/
 
 	return 0;
 }
