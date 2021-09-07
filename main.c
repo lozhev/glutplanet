@@ -646,16 +646,6 @@ MapProvider map;
 int tile_release(Tile* t) {
 	if(--t->ref == 0) {
 		array_push(tiles_release, t);
-		/*if(t->texdata) {
-			free(t->texdata);
-			t->texdata = 0;
-			//print("release texdata\n");
-		}
-		if(t->tex) {
-			glDeleteTextures(1, &t->tex);
-			t->tex = 0;
-		}
-		free(t);*/
 		return 1;
 	}
 	return 0;
@@ -742,23 +732,10 @@ void initYndexMap(MapProvider* map) {
 	//http://vec04.maps.yandex.net/tiles?l=map&v=2.16.0&x=9&y=6&z=4
 	sprintf(map->urlformat,"http://vec0%%s.maps.yandex.net/tiles?l=map&v=2.26.0&z=%%d&x=%%d&y=%%d");
 	sprintf(map->imgformat,"png");
-	//https://static-maps.yandex.ru/1.x/
-	//sprintf(map->subdomians[0],"");
-	//sprintf(map->subdomians[1],"");
-	//sprintf(map->subdomians[2],"");
-	//sprintf(map->subdomians[3],"");
-	//sprintf(map->urlformat,"https://static-maps%%s.yandex.ru/1.x/tiles?l=sat&z=%%d&x=%%d&y=%%d");
-	//sprintf(map->imgformat,"jpg");
 }
 
 void destroyMap(MapProvider* map) {
-	/*free(map->name);
-	free(map->subdomians[0]);
-	free(map->subdomians[1]);
-	free(map->subdomians[2]);
-	free(map->subdomians[3]);
-	free(map->urlformat);
-	free(map->imgformat);*/
+	//
 }
 
 void mapprovider_getFileName(MapProvider* map,Tile* tile,char* filename) {
@@ -791,6 +768,7 @@ stbi_uc* getImageData(Tile* tile) {
 		CURL* curl = curl_easy_init();
 		if (curl) {
 			char url[128];
+			char uagent[128]= "curl/" ;
 			char tmp[64];
 			FILE* stream=0;
 			mapprovider_getUrlName(&map,tile,url);
@@ -801,9 +779,14 @@ stbi_uc* getImageData(Tile* tile) {
 			stream=fopen(tmp, "wb");
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, stream);
+
+			curl_version_info_data* version_info = curl_version_info(CURLVERSION_NOW);
+			strcat(uagent, version_info->version);
+			curl_easy_setopt(curl, CURLOPT_USERAGENT, version_info->version);
+
 			//curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
 			//print("download url %s\n",url);
-			curl_easy_perform(curl);
+			CURLcode ret = curl_easy_perform(curl);
 			fclose(stream);
 			rename(tmp,filename);
 
@@ -813,9 +796,6 @@ stbi_uc* getImageData(Tile* tile) {
 	}
 	return data;
 }
-
-//int last_r_count = -1;
-//int release_count;
 
 void tiles_limit() {
 	if(tiles->count > 512) {// 4*6*18=432. 512 tiles ~100mb texures
@@ -856,19 +836,12 @@ Tile* tile_new(int x, int y, int z){
 	tile_init(newtile, x, y, z);
 	tile_make(newtile);
 
-	//mapprovider_getFileName(&map,newtile,filename);
-	//if(exists(filename)){
-	//	newtile->filename = strdup(filename);
-	//	array_push(tiles_loaded, newtile);
-	//} else {
-		//newtile->download = 1;
-		if (tile_tofirst_s(tiles_load,newtile) == 0){
-			newtile->ref+=1;
-			deque_push_front_s(tiles_load, newtile);
-		} else {
-			//print("new in load\n");
-		}
-	//}
+	if (tile_tofirst_s(tiles_load,newtile) == 0){
+		newtile->ref += 1;
+		deque_push_front_s(tiles_load, newtile);
+	} else {
+		//print("new in load\n");
+	}
 
 	deque_push_front(tiles, newtile);
 	
@@ -917,8 +890,8 @@ void make_tiles() {
 	minRow = (int)floor(_mind(mind(ctl.row,ctr.row),mind(cbl.row,cbr.row)));
 	maxRow = (int)floor(_maxd(maxd(ctl.row,ctr.row),maxd(cbl.row,cbr.row)));
 
-	minCol -= 1;//FIXME: calc veiwport area
-	maxCol += 1;
+	minCol -= 2;//FIXME: calc veiwport area
+	maxCol += 2;
 
 	row_count = (int)floor(pow(2.0, baseZoom))-1;
 	minCol = maxi(0,minCol);
@@ -926,53 +899,8 @@ void make_tiles() {
 	maxCol = mini(maxCol,row_count);
 	maxRow = mini(maxRow,row_count);
 
-	//print("area: %dx%d\n", (maxCol - minCol)+1, (maxRow - minRow)+1);
-
-	/*for(j = tiles_draw_count - 1; j>=0; --j) {
-		if (tile_release(tiles_draw[j])) print("tiles_draw release\n");
-	}*/
 	tiles_draw_count = 0;
-	/*col = minCol;
-	for (; col <= maxCol; ++col) {
-		int row = minRow;
-		for (; row <= maxRow; ++row) {
-			to_draw(baseZoom, col, row);
-		}
-	}*/
-	/*{
-		int SX=(maxCol - minCol)+1;
-		int SY=(maxRow - minRow)+1;
-		int min_x,min_y;
-		int max_x,max_y;
-		int j, dir=1;
-		int x = (SX / 2)-!(SX & 1);
-		int y = (SY / 2)-!(SY & 1);
-		x += minCol;
-		y += minRow;
-		min_x = x; max_x = x;
-		min_y = y; max_y = y;
-		for(j=0;j<SX*SY;++j){
-			to_draw(baseZoom,x,y);
-			switch(dir){
-			case 0:
-				x-=1;
-				if (x<min_x){ dir=1; min_x = x; }
-				break;
-			case 1:
-				y+=1;
-				if (y>max_y){ dir=2; max_y = y; }
-				break;
-			case 2:
-				x+=1;
-				if (x>max_x){ dir=3; max_x = x; }
-				break;
-			case 3:
-				y-=1;
-				if (y<min_y){ dir=0; min_y = y; }
-				break;
-			}
-		}
-	}*/
+
 	{
 		//int j;
 		int nx = maxCol;
@@ -985,7 +913,7 @@ void make_tiles() {
 		Tile t[128],p;
 		int t_count=0;
 		Node* node;
-		//release_count = 0;
+
 		//
 		while(n) {
 			for(j = sy; j <= ny; ++j) {
@@ -1037,7 +965,7 @@ void make_tiles() {
 
 void do_exit(void){
 	//destroy_synclist(tiles_get);
-//	clear_list(tiles);
+	//clear_list(tiles);
 	//destroy_list(tiles);
 	//destroyMap(&map);
 }
@@ -1193,6 +1121,8 @@ void createOrthographicOffCenter(float left, float right, float bottom, float to
 
 void reshape(int w, int h) {
 	float m[16];
+	veiwport[0] = w;
+	veiwport[1] = h;
 	glViewport(0, 0, w, h);
 	if (prog){
 		createOrthographicOffCenter(-w/2.f, w/2.f, h/2.f, -h/2.f, -1, 1, m);
@@ -1385,29 +1315,6 @@ void Render(float f){
 		
 		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
 	}
-
-	/*glUseProgram(prog_alpha);
-	for (i=0; i<tiles_blend->count; ++i) {
-		Tile* t = (Tile*)tiles_blend->data[i];
-
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D,t->ptex);
-		glUniform1i(u_tex,0);
-		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_2D,t->tex);
-		glUniform1i(u_tex2,1);
-		glUniform1f(u_alpha,t->blend);
-		glVertexAttribPointer(0,4,GL_FLOAT,GL_FALSE,0,t->vtx);
-		glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,0,texcoord);
-		glDrawArrays(GL_TRIANGLE_STRIP,0,4);
-
-		t->blend-=0.01f;
-		if(t->blend<=0){
-			t->blend = 0.f;
-			tiles_blend->data[i] = tiles_blend->data[--tiles_blend->count];
-			--i;
-		}
-	}*/
 
 	tiles_limit();
 
@@ -1666,7 +1573,7 @@ int main(int argc, char* argv[]) {
 	//initOSMMap(&map);
 	//initBingMap(&map);
 	//initYahooMap(&map);  //not work
-	//initYndexMap(&map);
+	//initYndexMap(&map);  // now not free
 	gladLoadGL();
 	prog = creatProg(vert_src,frag_src);
 	u_proj = glGetUniformLocation(prog, "u_proj");
