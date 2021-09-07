@@ -3,6 +3,8 @@ Simple map viewer like SAS.Planet for windows, linux, mac
 View tiles from Bing,Yandex,OpenStreetMap and other.
 Store tiles local in TMS format.
 
+<img align="left" src="http://lozhev.narod.ru/glutplanet.png" alt="im1" />
+
 # glutplanet 2.0
 OpenGL 2.0
 Ordered queue for tiles.
